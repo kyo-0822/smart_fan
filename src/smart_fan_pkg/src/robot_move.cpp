@@ -122,7 +122,7 @@ class Robot_move : public rclcpp::Node {
                 double target_x = target_follow_pose->pose.position.x;
                 double target_y = target_follow_pose->pose.position.y;
 
-                if (std::hypot(target_x, target_y) < 0.4) {
+                if (std::hypot(target_x, target_y) < 0.6) {
                     stop_robot();
                     return;
                 }
