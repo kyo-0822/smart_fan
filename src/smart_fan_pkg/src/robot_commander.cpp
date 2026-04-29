@@ -21,7 +21,7 @@ class Robot_Commander : public rclcpp::Node {
 
             // publisher
             mode_pub = this->create_publisher<std_msgs::msg::String>("current_mode", 10);
-            gestuer_cmd_pub = this->create_publisher<geometry_msgs::msg::Twist>("gesture_cmd", 10);
+            gesture_cmd_pub = this->create_publisher<geometry_msgs::msg::Twist>("gesture_cmd", 10);
             auto_drive_goal_pub = this->create_publisher<geometry_msgs::msg::PoseStamped>("auto_drive_goal", 10);
             follow_target_pub = this->create_publisher<geometry_msgs::msg::PoseStamped>("follow_target_pose", 10);
 
@@ -39,7 +39,7 @@ class Robot_Commander : public rclcpp::Node {
                 std::bind(&Robot_Commander::call_request_callback, this, std::placeholders::_1)
             );
             nav2_status_sub = this->create_subscription<std_msgs::msg::String>(
-                "nav2_status", 10,
+                "nav_status", 10,
                 std::bind(&Robot_Commander::nav2_status_callback, this, std::placeholders::_1)
             );
 
@@ -50,7 +50,7 @@ class Robot_Commander : public rclcpp::Node {
         void set_mode (const std::string& new_mode) {
             current_mode = new_mode;
             std_msgs::msg::String mode_msg;
-            mode_msg.data = currnet_mode;
+            mode_msg.data = current_mode;
             mode_pub->publish(mode_msg);
             RCLCPP_INFO(this->get_logger(), "Current mode : %s", current_mode.c_str());
         }
@@ -61,13 +61,11 @@ class Robot_Commander : public rclcpp::Node {
             auto_drive_goal_pub->publish(*msg);
         }
 
-        void nav_stauts_callback(const std_msgs::msg::String::SharedPtr msg) {
+        void nav2_status_callback(const std_msgs::msg::String::SharedPtr msg) {
             if (msg->data == "arrived" && current_mode == "auto_drive") {
                 set_mode("gesture");
             }
         }
-        
-        
 
         // ㅡㅡㅡㅡ LiDAR, yolo 처리 ㅡㅡㅡㅡ
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
@@ -127,7 +125,7 @@ class Robot_Commander : public rclcpp::Node {
                     break;
             }
 
-            cmd_vel_pub->publish(cmd);
+            gesture_cmd_pub->publish(cmd);
         }
 
         void follow_mode_handler(const std::vector<int>& bbox_data) {
@@ -145,7 +143,7 @@ class Robot_Commander : public rclcpp::Node {
             double angle_radian = ((image_width / 2.0) - current_x) / image_width * camera_fov_rad;
             double target_distance = angle_to_distance(angle_radian);
 
-            if (std::isfinite(front_distance) && target_distance < 5.0) {
+            if (std::isfinite(target_distance) && target_distance < 5.0) {
                 double target_x = target_distance * std::cos(angle_radian);
                 double target_y = target_distance * std::sin(angle_radian);
 
@@ -153,20 +151,20 @@ class Robot_Commander : public rclcpp::Node {
                 target_pose.header.stamp = this->now();
                 target_pose.header.frame_id = "base_link";
                 target_pose.pose.position.x = target_x;
-                target_pose.pose.posiiton.y = target_y;
+                target_pose.pose.position.y = target_y;
 
                 follow_target_pub->publish(target_pose);
             }
         }
 
-        void angle_to_distance(double target_angle_radian) {
+        double angle_to_distance(double target_angle_radian) {
             if (!latest_scan || latest_scan->ranges.empty()) return std::numeric_limits<double>::infinity();
             double angle_min = latest_scan->angle_min;
             double angle_increment = latest_scan->angle_increment;
             int total_ray = latest_scan->ranges.size();
             int target_idx = (target_angle_radian - angle_min) / angle_increment;
 
-            if (target_idx < 0 || target_idx >= totla_ray) return std::numeric_limits<double>::infinity();
+            if (target_idx < 0 || target_idx >= total_ray) return std::numeric_limits<double>::infinity();
 
             int count = 0;
             double sum = 0.0;
@@ -174,7 +172,7 @@ class Robot_Commander : public rclcpp::Node {
                 int idx = target_idx + i;
                 if (idx >= 0 && idx < total_ray) {
                     double range = latest_scan->ranges[idx];
-                    if (std::infinite(range) && range > 0.1) {
+                    if (std::isfinite(range) && range > 0.1) {
                         sum += range;
                         count++;
                     }
@@ -188,10 +186,10 @@ class Robot_Commander : public rclcpp::Node {
 
         std::string current_mode;
 
-        rclcpp::Publisher<std::msgs::msg::String>::SharedPtr mode_pub;
-        rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr gestuer_cmd_pub;
-        rclcpp::Publisher<geometry_msgs::msg::PoseStamped>SharedPtr auto_drive_goal_pub;
-        rclcpp::Publisher<geometry_msgs::msg::PoseStamped>SharedPtr follow_target_pub;
+        rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub;
+        rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr gesture_cmd_pub;
+        rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr auto_drive_goal_pub;
+        rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr follow_target_pub;
 
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
         rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr yolo_sub;

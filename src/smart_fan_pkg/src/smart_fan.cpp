@@ -2,6 +2,7 @@
 #include <cmath>
 #include <vector>
 #include <numeric>
+#include <limits>
 
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32.hpp"
@@ -10,41 +11,38 @@
 #include "trajectory_msgs/msg/joint_trajectory.hpp"
 
 class Smart_Fan : public rclcpp::Node {
-    // __init__():
     public: 
         Smart_Fan() : Node("smart_fan_node") {
             this->declare_parameter("fan_offset_y", -0.07); // 카메라 기준 왼쪽 7cm 지점
             this->declare_parameter("lidar_to_camera_offset", 0.1); // LiDAR와 카메라 앞 뒤 간격
 
-            fan_angle_pub = this-> create_publisher <std_msgs::msg::Float64> ("fan_angle", 10);
-            gazebo_pub = this-> create_publisher <trajectory_msgs::msg::JointTrajectory>("/set_joint_trajectory", 10);
+            fan_angle_pub = this->create_publisher<std_msgs::msg::Float64>("fan_angle", 10);
+            gazebo_pub = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/set_joint_trajectory", 10);
 
-            scan_sub = this->create_subscription <sensor_msgs::msg::LaserScan>(
-                "scan", rclcpp::SensorDataQoS(),
-                std::bind(&Smart_Fan::scan_callback, this, std::placeholders::_1));
+            scan_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
+                "scan", rclcpp::SensorDataQoS(), std::bind(&Smart_Fan::scan_callback, this, std::placeholders::_1));
 
-            yolo_zone_sub = this->create_subscription <std_msgs::msg::Int32> (
-                "yolo_zone", 10,
-                std::bind(&Smart_Fan::zone_callback, this, std::placeholders::_1));
+            yolo_zone_sub = this->create_subscription<std_msgs::msg::Int32>(
+                "yolo_zone", 10, std::bind(&Smart_Fan::zone_callback, this, std::placeholders::_1));
 
             // 구역별 각도
             camera_angle_degree = {24.0, 12.0, 0.0, -12.0, -24.0};
-            RCLCPP_INFO(this-> get_logger(), "node started");
+            RCLCPP_INFO(this->get_logger(), "node started");
         }
 
-    // def ooo():
     private:
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
-            latest_scan = msg; // 최신 LiDAR 데이터 저장
+            latest_scan = msg;
         }
 
         void zone_callback(const std_msgs::msg::Int32::SharedPtr msg) {
             if (!latest_scan) {
-                RCLCPP_WARN(this-> get_logger(), "LiDAR data error");
+                RCLCPP_WARN(this->get_logger(), "LiDAR data error");
                 return;
             }
 
-            int zone = msg->data; // 이미지 섹터
+            // 이미지 섹터
+            int zone = msg->data;
             if (zone < 0 || zone > 4) {
                 return; // 이미지 섹터 분류 오류 방어
             }
@@ -55,7 +53,7 @@ class Smart_Fan : public rclcpp::Node {
             double lidar_distance = get_distance_from_image(target_cam_radian);
 
             if (!std::isfinite(lidar_distance) || lidar_distance < 0.2) {
-                RCLCPP_WARN(this-> get_logger(), "Invalid LiDAR distance");
+                RCLCPP_WARN(this->get_logger(), "Invalid LiDAR distance");
                 lidar_distance = 1.0;
             }
 
