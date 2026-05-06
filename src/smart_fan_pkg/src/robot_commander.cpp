@@ -10,6 +10,7 @@
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
+#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/string.hpp"
 
 using namespace std::chrono_literals;
@@ -30,20 +31,24 @@ class Robot_Commander : public rclcpp::Node {
                 "scan", rclcpp::SensorDataQoS(),
                 std::bind(&Robot_Commander::scan_callback, this, std::placeholders::_1)
             );
-            yolo_sub = this->create_subscription<std_msgs::msg::Int32MultiArray>(
-                "yolo_detection", 10,
-                std::bind(&Robot_Commander::yolo_callback, this, std::placeholders::_1)
+            gesture_sub = this->create_subscription<std_msgs::msg::Int32MultiArray>(
+                "gesture_data", 10,
+                std::bind(&Robot_Commander::gesture_callback, this, std::placeholders::_1)
+            );
+            human_offset_sub = this->create_subscription<std_msgs::msg::Float64>(
+                "human_offset", 10,
+                std::bind(&Robot_Commander::human_offset_callback, this, std::placeholders::_1)
             );
             call_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
                 "call_position", 10,
                 std::bind(&Robot_Commander::call_request_callback, this, std::placeholders::_1)
             );
             nav2_status_sub = this->create_subscription<std_msgs::msg::String>(
-                "nav_status", 10,
+                "nav2_status", 10,
                 std::bind(&Robot_Commander::nav2_status_callback, this, std::placeholders::_1)
             );
 
-            RCLCPP_INFO(this->get_logger(), "Robot Activated...");
+            RCLCPP_INFO(this->get_logger(), "robot_commander activated ...");
         }
     
     private:
@@ -62,85 +67,80 @@ class Robot_Commander : public rclcpp::Node {
         }
 
         void nav2_status_callback(const std_msgs::msg::String::SharedPtr msg) {
-            if (msg->data == "arrived" && current_mode == "auto_drive") {
-                set_mode("gesture");
-            }
+            if (msg->data == "arrived" && current_mode == "auto_drive") { set_mode("gesture"); }
         }
 
-        // ㅡㅡㅡㅡ LiDAR, yolo 처리 ㅡㅡㅡㅡ
+        // ㅡㅡㅡㅡ LiDAR ㅡㅡㅡㅡ
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
             latest_scan = msg;
         }
 
-        void yolo_callback(const std_msgs::msg::Int32MultiArray::SharedPtr msg) {
-            if (msg->data.empty()) return;
+        // ㅡㅡㅡㅡ 제스쳐 인식 / 처리 ㅡㅡㅡㅡ
+        void gesture_callback(const std_msgs::msg::Int32MultiArray::SharedPtr msg) {
+            if (msg->data.size() < 2) { return; }
 
-            if (current_mode == "gesture") {
-                gesture_control_mode_handler(msg->data); // 제스쳐 제어 모드 함수 호출
-            } else if (current_mode == "follow") {
-                follow_mode_handler(msg->data); // 추종 모드 함수 호출
-            }
-        }
+            int class_id = msg->data[0];
+            int current_x = msg->data[1];
 
-        void gesture_control_mode_handler(const std::vector<int>& bbox_data) {
-            int class_id = bbox_data[0];
-            int current_x = bbox_data[1];
-            geometry_msgs::msg::Twist cmd;
-
-            // 클래스 동작 (0:손바닥, 1:손등, 2:손가락, 3:주먹)
-            switch (class_id) {
-                case 0: // 손바닥
-                    if (last_x > 0) {
-                        int diff = current_x - last_x;
-                        if (diff < -20) {
-                            cmd.angular.z = 0.5;
-                        } else if (diff > 20) {
-                            cmd.angular.z = -0.5;
-                        } else { 
-                            cmd.linear.x = 0.0;
-                            cmd.angular.z = 0.0; 
-                        }
-                    }
-                    last_x = current_x;
-                    break;
-
-                case 1: // 손등
-                    cmd.linear.x = 0.2;  
-                    last_x = -1;
-                    break;
-
-                case 2: // 손가락
-                    cmd.linear.x = -0.2;
-                    last_x = -1;
-                    break;
-
-                case 3: // 주먹
-                    set_mode("follow");
-                    last_x = -1;                    
-                    cmd.linear.x = 0.0;
-                    cmd.angular.z = 0.0;                    
-                    break;
-
-                default:
-                    break;
-            }
-
-            gesture_cmd_pub->publish(cmd);
-        }
-
-        void follow_mode_handler(const std::vector<int>& bbox_data) {
-            int class_id = bbox_data[0];
-
+            // class_id : 3 (주먹)으로 모드 전환
             if (class_id == 3) {
-                set_mode("gesture");
+                if (current_mode == "gesture") {
+                    set_mode("follow");
+                } else if ( current_mode == "follow") {
+                    set_mode("gesture");
+                }
+                last_x = -1;
                 return;
             }
 
-            if (class_id != 4) return;
+            // class_id :0 ~ 2로 동작 명령
+            if (current_mode == "gesture") {
+                geometry_msgs::msg::Twist cmd;
 
-            int current_x = bbox_data[1];
-            int image_width = 640; // 이미지 가로 방향 해상도
-            double angle_radian = ((image_width / 2.0) - current_x) / image_width * camera_fov_rad;
+                // 클래스 동작 (0:손바닥, 1:손등, 2:손가락, 3:주먹)
+                switch (class_id) {
+                    case 0: // 손바닥 ( 정지 / 회전 )
+                        if (last_x > 0) {
+                            int diff = current_x - last_x;
+                            if (diff < -20) {
+                                cmd.angular.z = 0.5;
+                            } else if (diff > 20) {
+                                cmd.angular.z = -0.5;
+                            } else { 
+                                cmd.linear.x = 0.0;
+                                cmd.angular.z = 0.0; 
+                            }
+                        }
+                        last_x = current_x;
+                        break;
+
+                    case 1: // 손등 (전진)
+                        cmd.linear.x = 0.2;  
+                        last_x = -1;
+                        break;
+
+                    case 2: // 손가락 (후진)
+                        cmd.linear.x = -0.2;
+                        last_x = -1;
+                        break;
+
+                    case 3: // 주먹 (모드 전환)
+                        // 위에서 미리 처리
+                        break;
+
+                    default:
+                        break;
+                }
+                gesture_cmd_pub->publish(cmd);
+            }
+        }
+
+        // ㅡㅡㅡㅡ 사람 추종 ㅡㅡㅡㅡ
+        void human_offset_callback(const std_msgs::msg::Float64::SharedPtr msg) {
+            if (current_mode != "follow") { return; }
+
+            double offset = msg->data;
+            double angle_radian = -offset * (camera_rad / 2.0);
             double target_distance = angle_to_distance(angle_radian);
 
             if (std::isfinite(target_distance) && target_distance < 5.0) {
@@ -156,15 +156,16 @@ class Robot_Commander : public rclcpp::Node {
                 follow_target_pub->publish(target_pose);
             }
         }
-
+        
+        // ㅡㅡㅡㅡ 거리 계산 ㅡㅡㅡㅡ
         double angle_to_distance(double target_angle_radian) {
-            if (!latest_scan || latest_scan->ranges.empty()) return std::numeric_limits<double>::infinity();
+            if (!latest_scan || latest_scan->ranges.empty()) { return std::numeric_limits<double>::infinity(); }
             double angle_min = latest_scan->angle_min;
             double angle_increment = latest_scan->angle_increment;
             int total_ray = latest_scan->ranges.size();
-            int target_idx = (target_angle_radian - angle_min) / angle_increment;
+            int target_idx = std::round((target_angle_radian - angle_min) / angle_increment);
 
-            if (target_idx < 0 || target_idx >= total_ray) return std::numeric_limits<double>::infinity();
+            if (target_idx < 0 || target_idx >= total_ray) { return std::numeric_limits<double>::infinity(); }
 
             int count = 0;
             double sum = 0.0;
@@ -182,7 +183,7 @@ class Robot_Commander : public rclcpp::Node {
         }
 
         int last_x = -1;
-        double camera_fov_rad = 1.047;
+        double camera_rad = 1.047; // 약 60도
 
         std::string current_mode;
 
@@ -192,7 +193,8 @@ class Robot_Commander : public rclcpp::Node {
         rclcpp::Publisher<geometry_msgs::msg::PoseStamped>::SharedPtr follow_target_pub;
 
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
-        rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr yolo_sub;
+        rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr gesture_sub;
+        rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr human_offset_sub;
         rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav2_status_sub;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr call_sub;
 

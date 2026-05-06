@@ -27,7 +27,7 @@ class Smart_Fan : public rclcpp::Node {
 
             // 구역별 각도
             camera_angle_degree = {24.0, 12.0, 0.0, -12.0, -24.0};
-            RCLCPP_INFO(this->get_logger(), "node started");
+            RCLCPP_INFO(this->get_logger(), "smart_fan activated ...");
         }
 
     private:
@@ -124,13 +124,14 @@ class Smart_Fan : public rclcpp::Node {
         return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity(); 
     }
 
+    std::vector<double> camera_angle_degree;
+
     rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
     rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr yolo_zone_sub;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr fan_angle_pub;
     rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr gazebo_pub;
 
     sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
-    std::vector<double> camera_angle_degree;
 };
 
 int main(int argc, char * argv[]) {
