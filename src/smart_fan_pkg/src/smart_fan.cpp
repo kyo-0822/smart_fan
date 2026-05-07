@@ -13,7 +13,7 @@
 class Smart_Fan : public rclcpp::Node {
     public: 
         Smart_Fan() : Node("smart_fan_node") {
-            this->declare_parameter("fan_offset_y", -0.07); // 카메라 기준 왼쪽 7cm 지점
+            this->declare_parameter("fan_offset_y", 0.07); // 카메라 기준 왼쪽 7cm 지점
             this->declare_parameter("lidar_to_camera_offset", 0.1); // LiDAR와 카메라 앞 뒤 간격
 
             fan_angle_pub = this->create_publisher<std_msgs::msg::Float64>("fan_angle", 10);
@@ -78,10 +78,11 @@ class Smart_Fan : public rclcpp::Node {
             // 아두이노 퍼블리시
             auto angle_msg = std_msgs::msg::Float64();
             angle_msg.data = target_angle;
-            fan_angle_pub-> publish(angle_msg);
+            fan_angle_pub->publish(angle_msg);
             
             // 가제보 퍼블리시
             trajectory_msgs::msg::JointTrajectory trajec_msg;
+            trajec_msg.header.stamp = this->now();
             trajec_msg.joint_names.push_back("fan_joint");
 
             trajectory_msgs::msg::JointTrajectoryPoint point;
@@ -89,49 +90,52 @@ class Smart_Fan : public rclcpp::Node {
             point.time_from_start.sec = 0;
             point.time_from_start.nanosec = 200000000;
             trajec_msg.points.push_back(point);
-            gazebo_pub-> publish(trajec_msg);
+            gazebo_pub->publish(trajec_msg);
             
             RCLCPP_INFO(this-> get_logger(), "Zone: %d | LiDAR: %.2fm | Dist: %.2fm | target angle: %.1f deg", zone, lidar_distance, distance, target_angle);
         }
     
-    double get_distance_from_image(double target_angle_radian) {
-        // LiDAR(반시계) 각도 보정 (음수인 경우 360도에서 빼서 계산)
-        double angle_in_scan = target_angle_radian;
-        if (angle_in_scan < 0.0) {
-            angle_in_scan += 2.0 * M_PI;
-        }
+        double get_distance_from_image(double target_angle_radian) {
+            // LiDAR(반시계) 각도 보정 (음수인 경우 360도에서 빼서 계산)
+            double angle_in_scan = target_angle_radian;
 
-        int index = std::round((angle_in_scan - latest_scan->angle_min) / latest_scan->angle_increment);
-        int total_ray = latest_scan->ranges.size();
-        
-        // LiDAR 인덱스 값 범위 설정
-        if (index < 0) { index = 0; } // 최소 0번째 부터
-        if (index >= total_ray) { index = total_ray -1; } // 360 번을 넘지 않도록
-
-        double sum = 0.0;
-        int count = 0;
-        // 객체 감지 LiDAR 데이터 주위 5개 인덱스 평균값
-        for (int i = -2; i <= 2; i++) {
-            int check_idx = (index + i + total_ray) % total_ray;
-            double range = latest_scan->ranges[check_idx];
-            if (std::isfinite(range)) {
-                sum += range;
-                count++;
+            if (angle_in_scan < latest_scan->angle_min) {
+                angle_in_scan += 2.0 * M_PI;
+            } else if (angle_in_scan > latest_scan->angle_max) {
+                angle_in_scan -= 2.0 * M_PI;
             }
+
+            int index = std::round((angle_in_scan - latest_scan->angle_min) / latest_scan->angle_increment);
+            int total_ray = latest_scan->ranges.size();
+            
+            // LiDAR 인덱스 값 범위 설정
+            if (index < 0) { index = 0; } // 최소 0번째 부터
+            if (index >= total_ray) { index = total_ray -1; } // 360 번을 넘지 않도록
+
+            double sum = 0.0;
+            int count = 0;
+            // 객체 감지 LiDAR 데이터 주위 5개 인덱스 평균값
+            for (int i = -2; i <= 2; i++) {
+                int check_idx = (index + i + total_ray) % total_ray;
+                double range = latest_scan->ranges[check_idx];
+                if (std::isfinite(range) && range >= latest_scan->range_min && range <= latest_scan->range_max) {
+                    sum += range;
+                    count++;
+                }
+            }
+            
+            // (조건식) count가 하나라도 있으면 평균값, 없으면 무한값(측정 불가)
+            return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity(); 
         }
 
-        // (조건식) count가 하나라도 있으면 평균값, 없으면 무한값(측정 불가)
-        return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity(); 
-    }
+        std::vector<double> camera_angle_degree;
 
-    std::vector<double> camera_angle_degree;
+        rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
+        rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr yolo_zone_sub;
+        rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr fan_angle_pub;
+        rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr gazebo_pub;
 
-    rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
-    rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr yolo_zone_sub;
-    rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr fan_angle_pub;
-    rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr gazebo_pub;
-
-    sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
+        sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
 };
 
 int main(int argc, char * argv[]) {

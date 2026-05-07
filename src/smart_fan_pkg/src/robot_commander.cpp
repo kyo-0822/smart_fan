@@ -53,11 +53,20 @@ class Robot_Commander : public rclcpp::Node {
     
     private:
         void set_mode (const std::string& new_mode) {
+            if (current_mode != new_mode) { stop_robot(); }
+            
             current_mode = new_mode;
             std_msgs::msg::String mode_msg;
             mode_msg.data = current_mode;
             mode_pub->publish(mode_msg);
             RCLCPP_INFO(this->get_logger(), "Current mode : %s", current_mode.c_str());
+        }
+
+        void stop_robot() {
+            geometry_msgs::msg::Twist stop_cmd;
+            stop_cmd.linear.x = 0.0;
+            stop_cmd.angular.z = 0.0;
+            gesture_cmd_pub->publish(stop_cmd);
         }
 
         // ㅡㅡㅡㅡ 로봇 호출 처리 ㅡㅡㅡㅡ
@@ -115,7 +124,7 @@ class Robot_Commander : public rclcpp::Node {
                         break;
 
                     case 1: // 손등 (전진)
-                        cmd.linear.x = 0.2;  
+                        cmd.linear.x = 0.2;
                         last_x = -1;
                         break;
 
@@ -160,23 +169,31 @@ class Robot_Commander : public rclcpp::Node {
         // ㅡㅡㅡㅡ 거리 계산 ㅡㅡㅡㅡ
         double angle_to_distance(double target_angle_radian) {
             if (!latest_scan || latest_scan->ranges.empty()) { return std::numeric_limits<double>::infinity(); }
+
             double angle_min = latest_scan->angle_min;
             double angle_increment = latest_scan->angle_increment;
             int total_ray = latest_scan->ranges.size();
-            int target_idx = std::round((target_angle_radian - angle_min) / angle_increment);
 
-            if (target_idx < 0 || target_idx >= total_ray) { return std::numeric_limits<double>::infinity(); }
+            double diff = target_angle_radian - angle_min;
+            while (diff < 0) { diff += 2.0* M_PI; }
+            while (diff >= 2.0 * M_PI) { diff -= 2.0 * M_PI; }
+
+            int target_idx = std::round(diff / angle_increment);
+            target_idx = target_idx % total_ray;
 
             int count = 0;
             double sum = 0.0;
+
             for (int i=-5; i<=5; i++){
-                int idx = target_idx + i;
-                if (idx >= 0 && idx < total_ray) {
-                    double range = latest_scan->ranges[idx];
-                    if (std::isfinite(range) && range > 0.1) {
-                        sum += range;
-                        count++;
-                    }
+                int idx = (target_idx + i) % total_ray;
+                if (idx < 0) {
+                    idx += total_ray;
+                }
+
+                double range = latest_scan->ranges[idx];
+                if (std::isfinite(range) && range > 0.1) {
+                    sum += range;
+                    count++;
                 }
             }
             return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity();

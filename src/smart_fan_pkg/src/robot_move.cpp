@@ -64,10 +64,13 @@ class Robot_move : public rclcpp::Node {
                 "global_costmap/costmap", 10, std::bind(&Robot_move::costmap_callback, this, std::placeholders::_1)
             );
             scan_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-                "scan", 10, std::bind(&Robot_move::scan_callback, this, std::placeholders::_1)
+                "scan", rclcpp::SensorDataQoS(), std::bind(&Robot_move::scan_callback, this, std::placeholders::_1)
             );
 
             timer = this->create_wall_timer(100ms, std::bind(&Robot_move::control_loop, this));
+
+
+            last_gesture_time = this->now();
 
             RCLCPP_INFO(this->get_logger(), "robot_move activated ...");
         }
@@ -88,7 +91,13 @@ class Robot_move : public rclcpp::Node {
         }
 
         void gesture_cmd_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
-            if (current_mode == "gesture") { cmd_vel_pub->publish(*msg); } 
+            if (current_mode == "gesture") {
+                last_gesture_time = this->now();
+                cmd_vel_pub->publish(*msg);
+
+                prev_linear_v = msg->linear.x;
+                prev_angular_w = msg->angular.z;
+            }
         }
         
         void auto_drive_callback(const geometry_msgs::msg::PoseStamped::SharedPtr msg) {
@@ -100,16 +109,23 @@ class Robot_move : public rclcpp::Node {
         void control_loop() {
             if (!current_odom) { return; }
 
+            // 제스쳐 제어중 손이 사라지면 0.5초 후 로봇 정지
+            if (current_mode == "gesture") {
+                if ((this->now() - last_gesture_time).seconds() > 0.5) {
+                    stop_robot();
+                }
+                return;
+            }
+
             if (current_mode == "auto_drive") {
                 // 현재 위치, 지도 정보 확인
                 if (!current_odom || !current_costmap || !target_auto_goal) { return; }
 
                 // 20cm 이하로 가까워지면 도착 판정
-                double dx = target_auto_goal->pose.position.x - current_odom->pose.position.x;
-                double dy = target_auto_goal->pose.position.y - current_odom->pose.position.y;
+                double dx = target_auto_goal->pose.position.x - current_odom->pose.pose.position.x;
+                double dy = target_auto_goal->pose.position.y - current_odom->pose.pose.position.y;
 
                 if (std::hypot(dx, dy) < 0.2) {
-                    current_mode = "waiting";
                     stop_robot();
 
                     std_msgs::msg::String status_msg;
@@ -127,7 +143,7 @@ class Robot_move : public rclcpp::Node {
                 
                 if (!current_global_path.empty()) {
                     geometry_msgs::msg::Twist cmd_vel;
-                    if (teb_planner(current_odom->pose.pose, current_global_path, current_costmap, cmd_vel)) {
+                    if (teb_planner(current_odom->pose.pose, current_global_path, cmd_vel)) {
                         cmd_vel_pub->publish(cmd_vel);
                     }
                 } else {
@@ -167,13 +183,17 @@ class Robot_move : public rclcpp::Node {
                 std::vector<geometry_msgs::msg::Pose> local_path = { absolute_target_pose };
                 geometry_msgs::msg::Twist cmd_vel;
 
-                if (teb_planner(current_odom->pose.pose, local_path, current_costmap, cmd_vel)) {
+                if (teb_planner(current_odom->pose.pose, local_path, cmd_vel)) {
                     cmd_vel_pub->publish(cmd_vel);
                 }
             }
         }
 
         void stop_robot() {
+            if (prev_linear_v == 0.0 && prev_angular_w == 0.0) {
+                return;
+            }
+
             prev_linear_v = 0.0;
             prev_angular_w = 0.0;
 
@@ -355,7 +375,6 @@ class Robot_move : public rclcpp::Node {
         bool teb_planner (
             const geometry_msgs::msg::Pose& current_pose,
             const std::vector<geometry_msgs::msg::Pose>& plan,
-            const nav_msgs::msg::OccupancyGrid::SharedPtr costmap,
             geometry_msgs::msg::Twist& cmd_vel_out
         ) {
             if (plan.empty()) { return false; }
@@ -502,6 +521,7 @@ class Robot_move : public rclcpp::Node {
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
 
         rclcpp::TimerBase::SharedPtr timer;
+        rclcpp::Time last_gesture_time;
 };
 
 int main(int argc, char * argv[]) {
