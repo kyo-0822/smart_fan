@@ -45,18 +45,18 @@ class RobotVision : public rclcpp::Node {
             
             // 터틀봇3 카메라
             cam_a_sub = this->create_subscription<sensor_msgs::msg::CompressedImage>(
-                "/camera/image_raw/compressed", rclcpp::SensorDataQos(),
+                "/camera/image_raw/compressed", rclcpp::SensorDataQoS(),
                 std::bind(&RobotVision::cam_a_callback, this, std::placeholders::_1)
             );
 
             // ros2 PC 카메라
             cam_B.open(0, cv::CAP_V4L2);
             if (!cam_B.isOpened()) {
-                RCLCPP_ERROR(this->get_logger(), "cam_B 열림");
+                RCLCPP_ERROR(this->get_logger(), "cam_B 연결 실패");
             } else {
                 cam_B.set(cv::CAP_PROP_FOURCC, cv::VideoWriter::fourcc('M','J','P','G'));
                 cam_B.set(cv::CAP_PROP_FPS, 30);
-                RCLCPP_INFO(this->get_logger(), "cam_B 연결 실패");
+                RCLCPP_INFO(this->get_logger(), "cam_B 연결 성공");
             }
             timer = this->create_wall_timer(100ms, std::bind(&RobotVision::vision_loop, this));
             
@@ -74,7 +74,7 @@ class RobotVision : public rclcpp::Node {
 
         void cam_a_callback(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
             try {
-                camA_frame = cv::imdecode(cv::Mat(msg->data), cv::IMREAD_COLOR);
+                cv::Mat decoded = cv::imdecode(cv::Mat(msg->data), cv::IMREAD_COLOR);
                 if (!camA_frame.empty()) {
                     camA_frame = decoded;
                     camA_ready = true;

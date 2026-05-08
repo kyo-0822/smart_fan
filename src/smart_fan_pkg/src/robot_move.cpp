@@ -11,8 +11,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/string.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
-#include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose.hpp"
+#include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "nav_msgs/msg/odometry.hpp"
 #include "nav_msgs/msg/occupancy_grid.hpp"
@@ -57,13 +57,16 @@ class Robot_move : public rclcpp::Node {
 
             // ㅡㅡㅡㅡ 알고리즘 센서 ㅡㅡㅡㅡ
             odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(
-                "odom", 10, std::bind(&Robot_move::odom_callback, this, std::placeholders::_1)
+                "/odom", 10,
+                std::bind(&Robot_move::odom_callback, this, std::placeholders::_1)
             );
             costmap_sub = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-                "/map", map_qos, std::bind(&Robot_move::costmap_callback, this, std::placeholders::_1)
+                "/map", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
+                std::bind(&Robot_move::costmap_callback, this, std::placeholders::_1)
             );
             scan_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-                "/scan", rclcpp::SensorDataQoS(), std::bind(&Robot_move::scan_callback, this, std::placeholders::_1)
+                "/scan", rclcpp::SensorDataQoS(),
+                std::bind(&Robot_move::scan_callback, this, std::placeholders::_1)
             );
 
             timer = this->create_wall_timer(100ms, std::bind(&Robot_move::control_loop, this));
@@ -76,7 +79,7 @@ class Robot_move : public rclcpp::Node {
         void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) { current_odom = msg; }
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) { latest_scan = msg; }
         void costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-            if (!currnet_costmap) {
+            if (!current_costmap) {
                 current_costmap = msg;
                 costmap_update = true;
             }
@@ -211,7 +214,7 @@ class Robot_move : public rclcpp::Node {
                           const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
 
             wx = costmap->info.origin.position.x + (mx + 0.5) * costmap->info.resolution;
-            wy = costmap->info.origin.position.y + (mx + 0.5) * costmap->info.resolution;
+            wy = costmap->info.origin.position.y + (my + 0.5) * costmap->info.resolution;
         }
 
         // ㅡㅡㅡㅡ Bresenham LoS( 시야선 ) 체크 ㅡㅡㅡㅡ
@@ -219,6 +222,8 @@ class Robot_move : public rclcpp::Node {
                         const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
             int dx = std::abs(x1 - x0);
             int dy = std::abs(y1 - y0);
+            int sx = (x0 < x1) ? 1 : -1;
+            int sy = (y0 < y1) ? 1 : -1;
             int err = dx - dy;
 
             while (true) {
@@ -298,7 +303,7 @@ class Robot_move : public rclcpp::Node {
                     if (cost >= 50 || cost == -1) { continue; } // 장애물 스킵
 
                     // 상위 노드와 이웃 노드간 LoS 체크
-                    int px = current.parent_x; py = current.parent_y;
+                    int px = current.parent_x, py = current.parent_y;
                     GridNode next_node;
                     next_node.x = nx;
                     next_node.y = ny;
@@ -308,13 +313,13 @@ class Robot_move : public rclcpp::Node {
                         next_node.parent_x = px;
                         next_node.parent_y = py;
                     } else { // LoS가 안통하면 현재 노드를 부모 노드로
-                        next_node.g_cost = current.g_cost + stop_cost;
+                        next_node.g_cost = current.g_cost + std::hypot(dx[i], dy[i]);
                         next_node.parent_x = current.x;
                         next_node.parent_y = current.y;
                     }
                     next_node.f_cost = next_node.g_cost + heuristic(nx, ny);
 
-                    if (!closed_set.find(n_idx) || next_node.g_cost < closed_set[n_idx].g_cost) {
+                    if (!closed_set.count(n_idx) || next_node.g_cost < closed_set[n_idx].g_cost) {
                         open_set.push(next_node);
                     }
                 }
@@ -322,7 +327,7 @@ class Robot_move : public rclcpp::Node {
 
             // 경로 역추적
             if (found) {
-                int cx = goal_x; cy = goal_y;
+                int cx = goal_x, cy = goal_y;
                 std::vector<geometry_msgs::msg::Pose> temp_path;
 
                 while (cx != start_x || cy != start_y) {
@@ -439,7 +444,7 @@ class Robot_move : public rclcpp::Node {
             double max_accel_v = 0.02; // 선속도
             double max_accel_w = 0.2; // 각속도
             target_linear_v = std::clamp(target_linear_v, prev_linear_v - max_accel_v, prev_linear_v + max_accel_v);
-            target_angular_w = std::clamp(target_angular_w, prev_angular_w - max_accel_w, prev_angular_w - max_accel_w);
+            target_angular_w = std::clamp(target_angular_w, prev_angular_w - max_accel_w, prev_angular_w + max_accel_w);
 
             prev_linear_v = target_linear_v;
             prev_angular_w = target_angular_w;
@@ -452,7 +457,7 @@ class Robot_move : public rclcpp::Node {
 
         bool replanning;
         bool costmap_update;
-        double prev_linear_v; prev_angular_w;
+        double prev_linear_v, prev_angular_w;
 
         std::string current_mode;
         std::vector<geometry_msgs::msg::Pose> current_global_path;
@@ -474,6 +479,7 @@ class Robot_move : public rclcpp::Node {
         rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr costmap_sub;
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
 
+        rclcpp::Time last_gesture_time;
         rclcpp::TimerBase::SharedPtr timer;
 };
 

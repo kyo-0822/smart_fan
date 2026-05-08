@@ -187,7 +187,7 @@ class Robot_Commander : public rclcpp::Node {
             int total_ray = latest_scan->ranges.size();
 
             double diff = target_angle_radian - angle_min;
-            int terget_idx = static_cast<int>(std::round(diff / angle_increment));
+            int target_idx = static_cast<int>(std::round(diff / angle_increment));
             target_idx = std::max(0, std::min(target_idx, total_ray -1));
 
             int count = 0;

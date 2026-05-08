@@ -24,11 +24,13 @@ class Smart_Fan : public rclcpp::Node {
             gazebo_pub = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/set_joint_trajectory", 10);
 
             scan_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-                "/scan", rclcpp::SensorDataQoS(), std::bind(&Smart_Fan::scan_callback, this, std::placeholders::_1)
+                "/scan", rclcpp::SensorDataQoS(),
+                std::bind(&Smart_Fan::scan_callback, this, std::placeholders::_1)
             );
 
             yolo_zone_sub = this->create_subscription<std_msgs::msg::Int32>(
-                "yolo_zone", 10, std::bind(&Smart_Fan::zone_callback, this, std::placeholders::_1)
+                "yolo_zone", 10,
+                std::bind(&Smart_Fan::zone_callback, this, std::placeholders::_1)
             );
 
             mode_sub = this->create_subscription<std_msgs::msg::String>(
@@ -69,7 +71,7 @@ class Smart_Fan : public rclcpp::Node {
             }
 
             // 카메라 기준 객체 거리 계산 ( LiDAR 활용 )
-            double distance = lidar_distance - lidar_co_camera_offset;
+            double distance = lidar_distance - lidar_to_camera_offset;
             if (distance <= 0.0) { distance = 0.1; }
 
             // 삼각 함수를 활용, 선풍기 회전 각도 계산
@@ -105,7 +107,10 @@ class Smart_Fan : public rclcpp::Node {
     
         double get_distance_from_image(double target_angle_radian) {
             // LiDAR(반시계) 각도 보정 (음수인 경우 360도에서 빼서 계산)
-            double angle_in_scan = target_angle_radian;
+            double diff = target_angle_radian - latest_scan->angle_min;
+            while (diff < 0) { diff += 2.0 * M_PI; }
+            whiel (diff >= 2.0 * M_PI) { diff -= 2.0 * M_PI }
+
             int index = static_cast<int>(std::round(diff / latest_scan->angle_increment));
             int total_ray = static_cast<int>(latest_scan->ranges.size());
 
@@ -124,17 +129,16 @@ class Smart_Fan : public rclcpp::Node {
                     count++;
                 }
             }
-            
             // (조건식) count가 하나라도 있으면 평균값, 없으면 무한값(측정 불가)
             return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity(); 
         }
-        std::string current_mode = "waiting";
 
+        std::string current_mode = "waiting";
+        
         double fan_offset_y;
         double lidar_to_camera_offset;
 
         std::vector<double> camera_angle_degree;
-
         sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
 
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr fan_angle_pub;
