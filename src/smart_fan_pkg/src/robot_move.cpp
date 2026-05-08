@@ -1,3 +1,4 @@
+//robot_move.cpp
 #include <memory>
 #include <string>
 #include <vector>
@@ -24,9 +25,7 @@ struct GridNode {
     double g_cost;
     double f_cost;
 
-    bool operator>(const GridNode& other) const {
-        return f_cost > other.f_cost;
-    }
+    bool operator>(const GridNode& other) const { return f_cost > other.f_cost; }
 };
 
 class Robot_move : public rclcpp::Node {
@@ -39,7 +38,7 @@ class Robot_move : public rclcpp::Node {
             prev_angular_w = 0.0;
 
             // ㅡㅡㅡㅡ publisher ㅡㅡㅡㅡ
-            cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("cmd_vel", 10);
+            cmd_vel_pub = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
             nav2_status_pub = this->create_publisher<std_msgs::msg::String>("nav2_status", 10);
 
             // ㅡㅡㅡㅡ subscription ㅡㅡㅡㅡ
@@ -61,18 +60,15 @@ class Robot_move : public rclcpp::Node {
                 "odom", 10, std::bind(&Robot_move::odom_callback, this, std::placeholders::_1)
             );
             costmap_sub = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
-                "global_costmap/costmap", 10, std::bind(&Robot_move::costmap_callback, this, std::placeholders::_1)
+                "/map", map_qos, std::bind(&Robot_move::costmap_callback, this, std::placeholders::_1)
             );
             scan_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-                "scan", rclcpp::SensorDataQoS(), std::bind(&Robot_move::scan_callback, this, std::placeholders::_1)
+                "/scan", rclcpp::SensorDataQoS(), std::bind(&Robot_move::scan_callback, this, std::placeholders::_1)
             );
 
             timer = this->create_wall_timer(100ms, std::bind(&Robot_move::control_loop, this));
 
-
-            last_gesture_time = this->now();
-
-            RCLCPP_INFO(this->get_logger(), "robot_move activated ...");
+            RCLCPP_INFO(this->get_logger(), "robot_move 노드 활성화 ...");
         }
 
     private:
@@ -80,8 +76,10 @@ class Robot_move : public rclcpp::Node {
         void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) { current_odom = msg; }
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) { latest_scan = msg; }
         void costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
-            current_costmap = msg;
-            costmap_update = true;
+            if (!currnet_costmap) {
+                current_costmap = msg;
+                costmap_update = true;
+            }
         }
         
         // ㅡㅡㅡㅡ 기본 모드 설정 ㅡㅡㅡㅡ
@@ -108,18 +106,12 @@ class Robot_move : public rclcpp::Node {
 
         void control_loop() {
             if (!current_odom) { return; }
-
-            // 제스쳐 제어중 손이 사라지면 0.5초 후 로봇 정지
-            if (current_mode == "gesture") {
-                if ((this->now() - last_gesture_time).seconds() > 0.5) {
-                    stop_robot();
-                }
-                return;
-            }
+            if (current_mode == "gesture") { return; }
+            if (current_mode == "waiting") { return; }
 
             if (current_mode == "auto_drive") {
                 // 현재 위치, 지도 정보 확인
-                if (!current_odom || !current_costmap || !target_auto_goal) { return; }
+                if (!current_costmap || !target_auto_goal) { return; }
 
                 // 20cm 이하로 가까워지면 도착 판정
                 double dx = target_auto_goal->pose.position.x - current_odom->pose.pose.position.x;
@@ -127,7 +119,6 @@ class Robot_move : public rclcpp::Node {
 
                 if (std::hypot(dx, dy) < 0.2) {
                     stop_robot();
-
                     std_msgs::msg::String status_msg;
                     status_msg.data = "arrived";
                     nav2_status_pub->publish(status_msg);
@@ -136,23 +127,29 @@ class Robot_move : public rclcpp::Node {
                 
                 // theta*로 전역 경로 생성
                 if (replanning || costmap_update) {
-                    current_global_path = theta_planner(current_odom->pose.pose, target_auto_goal->pose, current_costmap);
+                    current_global_path = theta_planner(
+                        current_odom->pose.pose,
+                        target_auto_goal->pose,
+                        current_costmap
+                    );
                     replanning = false;
                     costmap_update = false;
                 }
                 
                 if (!current_global_path.empty()) {
                     geometry_msgs::msg::Twist cmd_vel;
-                    if (teb_planner(current_odom->pose.pose, current_global_path, cmd_vel)) {
-                        cmd_vel_pub->publish(cmd_vel);
-                    }
+                    if (teb_planner(
+                        current_odom->pose.pose,
+                        current_global_path,
+                        cmd_vel)
+                    ) { cmd_vel_pub->publish(cmd_vel); }
                 } else {
                     // 경로 없으면 정지
                     stop_robot();
                 }
             } else if (current_mode == "follow") {
                 // 현재 위치, 지도 정보 확인
-                if (!current_odom || !latest_scan || !target_follow_pose) { return; }
+                if (!latest_scan || !target_follow_pose) { return; }
 
                 // 추종 대상과 40cm 이하로 가까워지면 안전 거리 유지
                 double target_x = target_follow_pose->pose.position.x;
@@ -190,19 +187,15 @@ class Robot_move : public rclcpp::Node {
         }
 
         void stop_robot() {
-            if (prev_linear_v == 0.0 && prev_angular_w == 0.0) {
-                return;
-            }
-
             prev_linear_v = 0.0;
             prev_angular_w = 0.0;
-
             geometry_msgs::msg::Twist stop_cmd;
             cmd_vel_pub->publish(stop_cmd);
         }
 
         // ㅡㅡㅡㅡ 좌표 변환 ㅡㅡㅡㅡ
-        bool world_to_map(double wx, double wy, int& mx, int& my, const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
+        bool world_to_map(double wx, double wy, int& mx, int& my,
+                          const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
             double origin_x = costmap->info.origin.position.x;
             double origin_y = costmap->info.origin.position.y;
             double res = costmap->info.resolution;
@@ -210,31 +203,29 @@ class Robot_move : public rclcpp::Node {
             mx = static_cast<int>((wx - origin_x) / res);
             my = static_cast<int>((wy - origin_y) / res);
 
-            return (mx >= 0 && mx < (int)costmap->info.width && my >= 0 && my < (int)costmap->info.height);
+            return (mx >= 0 && mx < (int)costmap->info.width &&
+                    my >= 0 && my < (int)costmap->info.height);
         }
 
-        void map_to_world(int mx, int my, double& wx, double& wy, const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
-            double origin_x = costmap->info.origin.position.x;
-            double origin_y = costmap->info.origin.position.y;
-            double res = costmap->info.resolution;
+        void map_to_world(int mx, int my, double& wx, double& wy,
+                          const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
 
-            wx = origin_x + (mx + 0.5) * res;
-            wy = origin_y + (my + 0.5) * res;
+            wx = costmap->info.origin.position.x + (mx + 0.5) * costmap->info.resolution;
+            wy = costmap->info.origin.position.y + (mx + 0.5) * costmap->info.resolution;
         }
 
         // ㅡㅡㅡㅡ Bresenham LoS( 시야선 ) 체크 ㅡㅡㅡㅡ
-        bool check_LoS (int x0, int y0, int x1, int y1, const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
+        bool check_LoS (int x0, int y0, int x1, int y1,
+                        const nav_msgs::msg::OccupancyGrid::SharedPtr costmap) {
             int dx = std::abs(x1 - x0);
             int dy = std::abs(y1 - y0);
-            int sx = (x0 < x1) ? 1 : -1;
-            int sy = (y0 < y1) ? 1 : -1;
             int err = dx - dy;
 
             while (true) {
-                if (x0 < 0 || x0 >= (int)costmap->info.width || y0 < 0 || y0 >= (int)costmap->info.height) { return false; }
+                if (x0 < 0 || x0 >= (int)costmap->info.width ||
+                    y0 < 0 || y0 >= (int)costmap->info.height) { return false; }
 
-                int index = y0 * costmap->info.width + x0;
-                int cost = costmap->data[index];
+                int cost = costmap->data[y0 * costmap->info.width + x0];
                 if (cost >= 50 || cost == -1) { return false; }
                 if (x0 == x1 && y0 == y1) { break; }
 
@@ -252,14 +243,11 @@ class Robot_move : public rclcpp::Node {
             const nav_msgs::msg::OccupancyGrid::SharedPtr costmap
         ) {
             std::vector<geometry_msgs::msg::Pose> path;
-            
             // 전방 직선 확인
             int start_x, start_y, goal_x, goal_y;
             // 맵 밖이면 빈 값 반환
             if(!world_to_map(start.position.x, start.position.y, start_x, start_y, costmap) ||
-            !world_to_map(goal.position.x, goal.position.y, goal_x, goal_y, costmap)) {
-                return path;
-            }
+               !world_to_map(goal.position.x, goal.position.y, goal_x, goal_y, costmap)) { return path; }
 
             // 장애물이 없으면 직진
             if (check_LoS(start_x, start_y, goal_x, goal_y, costmap)) {
@@ -273,49 +261,44 @@ class Robot_move : public rclcpp::Node {
 
             auto get_index = [&](int x, int y) { return y * costmap->info.width + x; };
             auto heuristic = [&](int x, int y) { return std::hypot(goal_x - x, goal_y - y); };
-            GridNode start_node = {start_x, start_y, 0.0, heuristic(start_x, start_y), start_x, start_y};
+
+            GridNode start_node = {start_x, start_y, start_x, start_y, 0.0, heuristic(start_x, start_y) };
             open_set.push(start_node);
 
-            bool found = false;
-            int max_iterations = 5000;
-            int iterations = 0;
             int dx[8] = {1, -1, 0, 0, 1, 1, -1, -1};
             int dy[8] = {0, 0, 1, -1, 1, -1, 1, -1};
 
-            while (!open_set.empty() && iterations < max_iterations) {
-                GridNode current = open_set.top();
-                open_set.pop();
+            bool found = false;
+            int iterations = 0;
+
+            while (!open_set.empty() && iterations < 5000) {
+                GridNode current = open_set.top(); open_set.pop();
                 iterations++;
 
                 int current_idx = get_index(current.x, current.y);
 
                 // 더 좋은 비용으로 왔으면 스킵
-                if (closed_set.find(current_idx) != closed_set.end() && closed_set[current_idx].g_cost <= current.g_cost) {
-                    continue;
-                }
+                if (closed_set.find(current_idx) != closed_set.end() &&
+                    closed_set[current_idx].g_cost <= current.g_cost) { continue; }
+
                 closed_set[current_idx] = current;
 
-                if (current.x == goal_x && current.y == goal_y) {
-                    found = true;
-                    break;
-                }
+                if (current.x == goal_x && current.y == goal_y) { found = true;  break; }
 
                 // 8방향 경로 탐색
                 for (int i=0; i<8; i++) {
                     int nx = current.x + dx[i];
                     int ny = current.y + dy[i];
 
-                    if (nx < 0 || nx >= (int)costmap->info.width || ny < 0 || ny >= (int)costmap->info.height) { continue; }
+                    if (nx < 0 || nx >= (int)costmap->info.width ||
+                        ny < 0 || ny >= (int)costmap->info.height) { continue; }
 
                     int n_idx = get_index(nx, ny);
                     int cost = costmap->data[n_idx];
                     if (cost >= 50 || cost == -1) { continue; } // 장애물 스킵
 
                     // 상위 노드와 이웃 노드간 LoS 체크
-                    int px = current.parent_x;
-                    int py = current.parent_y;
-
-                    double stop_cost = std::hypot(dx[i], dy[i]);
+                    int px = current.parent_x; py = current.parent_y;
                     GridNode next_node;
                     next_node.x = nx;
                     next_node.y = ny;
@@ -329,10 +312,9 @@ class Robot_move : public rclcpp::Node {
                         next_node.parent_x = current.x;
                         next_node.parent_y = current.y;
                     }
-
                     next_node.f_cost = next_node.g_cost + heuristic(nx, ny);
 
-                    if (closed_set.find(n_idx) == closed_set.end() || next_node.g_cost < closed_set[n_idx].g_cost) {
+                    if (!closed_set.find(n_idx) || next_node.g_cost < closed_set[n_idx].g_cost) {
                         open_set.push(next_node);
                     }
                 }
@@ -340,8 +322,7 @@ class Robot_move : public rclcpp::Node {
 
             // 경로 역추적
             if (found) {
-                int cx = goal_x;
-                int cy = goal_y;
+                int cx = goal_x; cy = goal_y;
                 std::vector<geometry_msgs::msg::Pose> temp_path;
 
                 while (cx != start_x || cy != start_y) {
@@ -353,21 +334,16 @@ class Robot_move : public rclcpp::Node {
                     temp_path.push_back(p);
 
                     int p_idx = get_index(cx, cy);
-                    int px = closed_set[p_idx].parent_x;
-                    int py = closed_set[p_idx].parent_y;
-                    cx = px;
-                    cy = py;
+                    cx = closed_set[p_idx].parent_x;
+                    cy = closed_set[p_idx].parent_y;
                 }
                 temp_path.push_back(start);
                 
-                for (auto it = temp_path.rbegin(); it != temp_path.rend(); ++it) {
-                    path.push_back(*it);
-                }            
+                for (auto it = temp_path.rbegin(); it != temp_path.rend(); ++it) { path.push_back(*it); }            
             } else { // 장애물 있으면 현재 위치와 목적지만 TEB에 전달
                 path.push_back(start);
                 path.push_back(goal);
             }
-
             return path;
         }
 
@@ -380,8 +356,8 @@ class Robot_move : public rclcpp::Node {
             if (plan.empty()) { return false; }
 
             // 로봇의 yaw 계산
-            double siny_cosp = 2 * (current_pose.orientation.w * current_pose.orientation.z);
-            double cosy_cosp = 1 - 2 * (current_pose.orientation.z * current_pose.orientation.z);
+            double siny_cosp = 2.0 * (current_pose.orientation.w * current_pose.orientation.z);
+            double cosy_cosp = 1.0 - 2.0 * (current_pose.orientation.z * current_pose.orientation.z);
             double current_yaw = std::atan2(siny_cosp, cosy_cosp);
 
             // 고무줄 경로 추출
@@ -394,13 +370,12 @@ class Robot_move : public rclcpp::Node {
 
             // 장애물 위치 > 로봇 기준 절대 좌표
             std::vector<std::pair<double, double>> obstacles;
-
             if (latest_scan && !latest_scan->ranges.empty()) {
                 int total_ranges = latest_scan->ranges.size();
                 double angle_increment = latest_scan->angle_increment;
                 double angle_min = latest_scan->angle_min;
 
-                for (int i=0; i<total_ranges; i++) {
+                for (int i = 0; i < total_ranges; i++) {
                     double range = latest_scan->ranges[i];
                     if (std::isinf(range)) { range = latest_scan->range_max; }
 
@@ -415,15 +390,13 @@ class Robot_move : public rclcpp::Node {
             }
 
             // 밴드 최적화
-            int num_iteration = 5; // 최적화 횟수
             double internal_weight = 0.5; // 장력
             double external_weight = 0.02; // 척력
 
-            for (int iter=0; iter<num_iteration; iter++) {
+            for (int iter = 0; iter < 5; iter++) {
                 std::vector<std::pair<double, double>> new_band = band;
-
                 // 내부 점들만 최적화
-                for (size_t i=1; i<band.size()-1; ++i) {
+                for (size_t i = 1; i < band.size() - 1; ++i) {
                     // 내부 장력
                     double spring_x = ((band[i-1].first + band[i+1].first) / 2.0) - band[i].first;
                     double spring_y = ((band[i-1].second + band[i+1].second) / 2.0) - band[i].second;
@@ -444,13 +417,10 @@ class Robot_move : public rclcpp::Node {
                 band = new_band;
             }
 
-            int target_idx = std::min(2, (int)band.size() - 1);
-            double target_x = band[target_idx].first;
-            double target_y = band[target_idx].second;
-
             // 목표 지점에 인력 작용
-            double dx = target_x - current_pose.position.x;
-            double dy = target_y - current_pose.position.y;
+            int target_idx = std::min(2, (int)band.size() - 1);
+            double dx = band[target_idx].first - current_pose.position.x;
+            double dy = band[target_idx].second - current_pose.position.y;
 
             // 목표 지점 yaw 계산
             double target_yaw = std::atan2(dy, dx);
@@ -461,30 +431,15 @@ class Robot_move : public rclcpp::Node {
             while(heading_diff < -M_PI) heading_diff += 2.0 * M_PI;
 
             // 거리, 각도 차이 비례 속도 제어
-            double target_linear_v = 0.2;
-            target_linear_v = target_linear_v * std::max(0.0, 1.0 - std::abs(heading_diff) / (M_PI / 2.0));
-
+            double target_linear_v = 0.2 * std::max(0.0, 1.0 - std::abs(heading_diff) / (M_PI / 2.0));
             double target_angular_w = heading_diff * 1.5;
-            
-            // 터틀봇3 와플파이 하드웨어 스펙 제한
-            if (target_linear_v > 0.26) { target_linear_v = 0.26; }
-            if (target_angular_w > 1.8) { target_angular_w = 1.8; }
-            if (target_angular_w < -1.8) { target_angular_w = -1.8; }
+            target_linear_v = std::clamp(target_linear_v, 0.0, 0.26);
+            target_angular_w = std::clamp(target_angular_w, -1.8, 1.8);
 
             double max_accel_v = 0.02; // 선속도
             double max_accel_w = 0.2; // 각속도
-
-            if (target_linear_v > prev_linear_v + max_accel_v) {
-                target_linear_v = prev_linear_v + max_accel_v;
-            } else if (target_linear_v < prev_linear_v - max_accel_v) {
-                target_linear_v = prev_linear_v - max_accel_v;
-            }
-
-            if (target_angular_w > prev_angular_w + max_accel_w) {
-                target_angular_w = prev_angular_w + max_accel_w;
-            } else if (target_angular_w < prev_angular_w - max_accel_w) {
-                target_angular_w = prev_angular_w - max_accel_w;
-            }
+            target_linear_v = std::clamp(target_linear_v, prev_linear_v - max_accel_v, prev_linear_v + max_accel_v);
+            target_angular_w = std::clamp(target_angular_w, prev_angular_w - max_accel_w, prev_angular_w - max_accel_w);
 
             prev_linear_v = target_linear_v;
             prev_angular_w = target_angular_w;
@@ -497,8 +452,7 @@ class Robot_move : public rclcpp::Node {
 
         bool replanning;
         bool costmap_update;
-        double prev_linear_v;
-        double prev_angular_w;
+        double prev_linear_v; prev_angular_w;
 
         std::string current_mode;
         std::vector<geometry_msgs::msg::Pose> current_global_path;
@@ -521,7 +475,6 @@ class Robot_move : public rclcpp::Node {
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
 
         rclcpp::TimerBase::SharedPtr timer;
-        rclcpp::Time last_gesture_time;
 };
 
 int main(int argc, char * argv[]) {

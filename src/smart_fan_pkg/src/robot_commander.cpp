@@ -1,3 +1,4 @@
+//robot_commander.cpp
 #include <memory>
 #include <chrono>
 #include <string>
@@ -28,7 +29,7 @@ class Robot_Commander : public rclcpp::Node {
 
             // subscription
             scan_sub = this->create_subscription<sensor_msgs::msg::LaserScan>(
-                "scan", rclcpp::SensorDataQoS(),
+                "/scan", rclcpp::SensorDataQoS(),
                 std::bind(&Robot_Commander::scan_callback, this, std::placeholders::_1)
             );
             gesture_sub = this->create_subscription<std_msgs::msg::Int32MultiArray>(
@@ -48,18 +49,41 @@ class Robot_Commander : public rclcpp::Node {
                 std::bind(&Robot_Commander::nav2_status_callback, this, std::placeholders::_1)
             );
 
-            RCLCPP_INFO(this->get_logger(), "robot_commander activated ...");
+            RCLCPP_INFO(this->get_logger(), "robot_commander 노드 활성화 ...");
+
+
+            // sim_timer = this->create_wall_timer(
+            //     5s, [this]() -> void {
+            //         RCLCPP_INFO(this->get_logger(), "--- Simulation: 5 seconds passed. Requesting Robot... ---");
+                    
+            //         auto fake_pose = geometry_msgs::msg::PoseStamped();
+            //         fake_pose.header.stamp = this->now();
+            //         fake_pose.header.frame_id = "map";
+            //         fake_pose.pose.position.x = 2.34; 
+            //         fake_pose.pose.position.y = -2.49;
+            //         fake_pose.pose.orientation.w = 1.0;
+
+            //         this->call_request_callback(std::make_shared<geometry_msgs::msg::PoseStamped>(fake_pose));
+                    
+            //         // ✅ 해결: this->를 붙여 멤버 변수임을 확실히 알립니다.
+            //         if (this->sim_timer) {
+            //             this->sim_timer->cancel();
+            //         }
+            //     }
+            // );
         }
     
     private:
         void set_mode (const std::string& new_mode) {
-            if (current_mode != new_mode) { stop_robot(); }
+            if (current_mode == new_mode) { return; }
             
+            stop_robot();
             current_mode = new_mode;
+
             std_msgs::msg::String mode_msg;
             mode_msg.data = current_mode;
             mode_pub->publish(mode_msg);
-            RCLCPP_INFO(this->get_logger(), "Current mode : %s", current_mode.c_str());
+            RCLCPP_INFO(this->get_logger(), "현재 모드 : %s", current_mode.c_str());
         }
 
         void stop_robot() {
@@ -93,55 +117,43 @@ class Robot_Commander : public rclcpp::Node {
 
             // class_id : 3 (주먹)으로 모드 전환
             if (class_id == 3) {
-                if (current_mode == "gesture") {
-                    set_mode("follow");
-                } else if ( current_mode == "follow") {
-                    set_mode("gesture");
-                }
+                if      (current_mode == "gesture") { set_mode("follow"); }
+                else if ( current_mode == "follow") { set_mode("gesture"); }
                 last_x = -1;
                 return;
             }
 
             // class_id :0 ~ 2로 동작 명령
-            if (current_mode == "gesture") {
-                geometry_msgs::msg::Twist cmd;
+            if (current_mode != "gesture") { return; }
 
-                // 클래스 동작 (0:손바닥, 1:손등, 2:손가락, 3:주먹)
-                switch (class_id) {
-                    case 0: // 손바닥 ( 정지 / 회전 )
-                        if (last_x > 0) {
-                            int diff = current_x - last_x;
-                            if (diff < -20) {
-                                cmd.angular.z = 0.5;
-                            } else if (diff > 20) {
-                                cmd.angular.z = -0.5;
-                            } else { 
-                                cmd.linear.x = 0.0;
-                                cmd.angular.z = 0.0; 
-                            }
-                        }
-                        last_x = current_x;
-                        break;
+            geometry_msgs::msg::Twist cmd;
 
-                    case 1: // 손등 (전진)
-                        cmd.linear.x = 0.2;
-                        last_x = -1;
-                        break;
+            // 클래스 동작 (0:손바닥, 1:손등, 2:손가락, 3:주먹)
+            switch (class_id) {
+                case 0: // 손바닥 ( 정지 / 회전 )
+                    if (last_x > 0) {
+                        int diff = current_x - last_x;
+                        if      (diff < -20) { cmd.angular.z = 0.5; }
+                        else if (diff > 20)  { cmd.angular.z = -0.5; }
+                        else                 { cmd.linear.x = 0.0; cmd.angular.z = 0.0; }
+                    }
+                    last_x = current_x;
+                    break;
 
-                    case 2: // 손가락 (후진)
-                        cmd.linear.x = -0.2;
-                        last_x = -1;
-                        break;
+                case 1: // 손등 (전진)
+                    cmd.linear.x = 0.2;
+                    last_x = -1;
+                    break;
 
-                    case 3: // 주먹 (모드 전환)
-                        // 위에서 미리 처리
-                        break;
+                case 2: // 손가락 (후진)
+                    cmd.linear.x = -0.2;
+                    last_x = -1;
+                    break;
 
-                    default:
-                        break;
-                }
-                gesture_cmd_pub->publish(cmd);
+                default:
+                    break;
             }
+            gesture_cmd_pub->publish(cmd);
         }
 
         // ㅡㅡㅡㅡ 사람 추종 ㅡㅡㅡㅡ
@@ -175,20 +187,15 @@ class Robot_Commander : public rclcpp::Node {
             int total_ray = latest_scan->ranges.size();
 
             double diff = target_angle_radian - angle_min;
-            while (diff < 0) { diff += 2.0* M_PI; }
-            while (diff >= 2.0 * M_PI) { diff -= 2.0 * M_PI; }
-
-            int target_idx = std::round(diff / angle_increment);
-            target_idx = target_idx % total_ray;
+            int terget_idx = static_cast<int>(std::round(diff / angle_increment));
+            target_idx = std::max(0, std::min(target_idx, total_ray -1));
 
             int count = 0;
             double sum = 0.0;
 
-            for (int i=-5; i<=5; i++){
-                int idx = (target_idx + i) % total_ray;
-                if (idx < 0) {
-                    idx += total_ray;
-                }
+            for (int i= -5; i <= 5; i++){
+                int idx = target_idx + i;
+                if (idx < 0 || idx >= total_ray) { continue; }
 
                 double range = latest_scan->ranges[idx];
                 if (std::isfinite(range) && range > 0.1) {
@@ -216,6 +223,8 @@ class Robot_Commander : public rclcpp::Node {
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr call_sub;
 
         sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
+
+        rclcpp::TimerBase::SharedPtr sim_timer;
 };
 
 int main(int argc, char * argv[]) {
