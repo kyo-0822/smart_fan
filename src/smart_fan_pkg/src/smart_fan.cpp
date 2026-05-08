@@ -15,10 +15,17 @@
 class Smart_Fan : public rclcpp::Node {
     public: 
         Smart_Fan() : Node("smart_fan_node") {
-            this->declare_parameter("fan_offset_y", 0.07); // 카메라 기준 왼쪽 7cm 지점
-            this->declare_parameter("lidar_to_camera_offset", 0.1); // LiDAR와 카메라 앞 뒤 간격
-            fan_offset_y = this->get_parameter("fan_offset_y").as_oduble();
-            lidar_to_camera_offset = this->get_parameter("lidar_to_camera_offset").as_oduble();
+            current_mode = "waiting";
+            fan_offset_y = 0.07;
+            lidar_to_camera_offset = 0.1;
+
+            this->declare_parameter("fan_offset_y", fan_offset_y); // 카메라 기준 왼쪽 7cm 지점
+            this->declare_parameter("lidar_to_camera_offset", lidar_to_camera_offset); // LiDAR와 카메라 앞 뒤 간격
+            fan_offset_y = this->get_parameter("fan_offset_y").as_double();
+            lidar_to_camera_offset = this->get_parameter("lidar_to_camera_offset").as_double();
+
+            // 구역별 각도
+            camera_angle_degree = {24.0, 12.0, 0.0, -12.0, -24.0};
 
             fan_angle_pub = this->create_publisher<std_msgs::msg::Float64>("fan_angle", 10);
             gazebo_pub = this->create_publisher<trajectory_msgs::msg::JointTrajectory>("/set_joint_trajectory", 10);
@@ -38,33 +45,35 @@ class Smart_Fan : public rclcpp::Node {
                 std::bind(&Smart_Fan::mode_callback, this, std::placeholders::_1)
             );
 
-            // 구역별 각도
-            camera_angle_degree = {24.0, 12.0, 0.0, -12.0, -24.0};
-
             RCLCPP_INFO(this->get_logger(), "smart_fan 노드 활성화 ...");
         }
 
     private:
-        void mode_callback(const std_msgs::msg::String::SharedPtr msg) { current_mode = msg->data; }
+        void mode_callback(const std_msgs::msg::String::SharedPtr msg) {
+            if (current_mode != msg->data) {
+                current_mode = msg->data;
+                RCLCPP_INFO(this->get_logger(), "모드 전환 -> %s", current_mode.c_str());
+            }
+        }
+
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) { latest_scan = msg; }
 
         void zone_callback(const std_msgs::msg::Int32::SharedPtr msg) {
-            if (current_mode != "follow") { return ;}
-
             if (!latest_scan) {
                 RCLCPP_WARN(this->get_logger(), "LiDAR 데이터 없음");
                 return;
             }
 
+            if (current_mode != "follow") { return ;}
+
             // 이미지 섹터 (이미지 섹터 분류 오류 방어)
             int zone = msg->data;
-            if (zone < 0 || zone > 4) { return; }
+            if (zone < 0 || zone >= (int)camera_angle_degree.size()) { return; }
 
-            // LiDAR에서 해당 각도 거리 추출
-            double target_cam_degree = camera_angle_degree[zone];
-            double target_cam_radian = target_cam_degree * M_PI / 180.0;
+            // 카메라 -> 라디안 변환
+            double target_cam_radian = camera_angle_degree[zone] * M_PI / 180.0;
             double lidar_distance = get_distance_from_image(target_cam_radian);
-
+            
             if (!std::isfinite(lidar_distance) || lidar_distance < 0.2) {
                 RCLCPP_WARN(this->get_logger(), "LiDAR 거리 기본값 : 1m");
                 lidar_distance = 1.0;
@@ -77,16 +86,15 @@ class Smart_Fan : public rclcpp::Node {
             // 삼각 함수를 활용, 선풍기 회전 각도 계산
             double c_x = distance * cos(target_cam_radian);
             double c_y = distance * sin(target_cam_radian);
-
             double vector_x = c_x; // x축은 고정
             double vector_y = c_y - fan_offset_y;
             
             double target_radian = std::atan2(vector_y, vector_x);
-            double target_angle = target_radian * 180.0 / M_PI;
+            double target_degree = target_radian * 180.0 / M_PI;
 
             // 아두이노 퍼블리시
             auto angle_msg = std_msgs::msg::Float64();
-            angle_msg.data = target_angle;
+            angle_msg.data = target_degree;
             fan_angle_pub->publish(angle_msg);
             
             // 가제보 퍼블리시
@@ -102,18 +110,17 @@ class Smart_Fan : public rclcpp::Node {
             gazebo_pub->publish(trajec_msg);
             
             RCLCPP_INFO(this-> get_logger(), "Zone: %d | LiDAR: %.2fm | Dist: %.2fm | target angle: %.1f deg",
-                                              zone, lidar_distance, distance, target_angle);
+                                              zone, lidar_distance, distance, target_degree);
         }
     
         double get_distance_from_image(double target_angle_radian) {
             // LiDAR(반시계) 각도 보정 (음수인 경우 360도에서 빼서 계산)
             double diff = target_angle_radian - latest_scan->angle_min;
             while (diff < 0) { diff += 2.0 * M_PI; }
-            whiel (diff >= 2.0 * M_PI) { diff -= 2.0 * M_PI }
+            while (diff >= 2.0 * M_PI) { diff -= 2.0 * M_PI; }
 
-            int index = static_cast<int>(std::round(diff / latest_scan->angle_increment));
             int total_ray = static_cast<int>(latest_scan->ranges.size());
-
+            int index = static_cast<int>(std::round(diff / latest_scan->angle_increment));
             index = std::max(0, std::min(index, total_ray - 1));
 
             double sum = 0.0;
@@ -133,7 +140,7 @@ class Smart_Fan : public rclcpp::Node {
             return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity(); 
         }
 
-        std::string current_mode = "waiting";
+        std::string current_mode;
         
         double fan_offset_y;
         double lidar_to_camera_offset;
@@ -145,8 +152,8 @@ class Smart_Fan : public rclcpp::Node {
         rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr gazebo_pub;
 
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
-        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr yolo_zone_sub;
-        rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr mode_sub;
+        rclcpp::Subscription<std_msgs::msg::Int32>::SharedPtr yolo_zone_sub;
+        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub;
 };
 
 int main(int argc, char * argv[]) {

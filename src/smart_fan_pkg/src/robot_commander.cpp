@@ -52,25 +52,53 @@ class Robot_Commander : public rclcpp::Node {
             RCLCPP_INFO(this->get_logger(), "robot_commander 노드 활성화 ...");
 
 
+            init_timer = this->create_wall_timer(
+                500ms, [this]() -> void {
+                    pub_mode();
+                    init_timer->cancel();
+                }
+            );
+
+            // // 제자리에서 바로 제스쳐로 전환
             // sim_timer = this->create_wall_timer(
             //     5s, [this]() -> void {
-            //         RCLCPP_INFO(this->get_logger(), "--- Simulation: 5 seconds passed. Requesting Robot... ---");
-                    
-            //         auto fake_pose = geometry_msgs::msg::PoseStamped();
-            //         fake_pose.header.stamp = this->now();
-            //         fake_pose.header.frame_id = "map";
-            //         fake_pose.pose.position.x = 2.34; 
-            //         fake_pose.pose.position.y = -2.49;
-            //         fake_pose.pose.orientation.w = 1.0;
+            //         RCLCPP_INFO(this->get_logger(), "테스트: auto_drive 전환");
+            //         set_mode("auto_drive");
 
-            //         this->call_request_callback(std::make_shared<geometry_msgs::msg::PoseStamped>(fake_pose));
-                    
-            //         // ✅ 해결: this->를 붙여 멤버 변수임을 확실히 알립니다.
-            //         if (this->sim_timer) {
-            //             this->sim_timer->cancel();
-            //         }
+            //         // 3초 뒤 gesture 모드로 전환
+            //         gesture_timer = this->create_wall_timer(
+            //             3s, [this]() -> void {
+            //                 RCLCPP_INFO(this->get_logger(), "테스트: gesture 전환");
+            //                 set_mode("gesture");
+            //                 if (this->gesture_timer) { this->gesture_timer->cancel(); }
+            //             }
+            //         );
+
+            //         if (this->sim_timer) { this->sim_timer->cancel(); }
             //     }
             // );
+
+            sim_timer = this->create_wall_timer(
+                5s, [this]() -> void {
+                    RCLCPP_INFO(this->get_logger(), "5초 경과 → auto_drive 모드 시작");
+
+                    auto goal_pose = geometry_msgs::msg::PoseStamped();
+                    goal_pose.header.stamp    = this->now();
+                    goal_pose.header.frame_id = "map";
+                    goal_pose.pose.position.x = 2.46;   // ✅ 목적지 좌표
+                    goal_pose.pose.position.y = -2.62;
+                    goal_pose.pose.orientation.w = 1.0;
+
+                    this->call_request_callback(
+                        std::make_shared<geometry_msgs::msg::PoseStamped>(goal_pose)
+                    );
+
+                    // 한 번만 실행하고 타이머 종료
+                    if (this->sim_timer) {
+                        this->sim_timer->cancel();
+                    }
+                }
+            );
         }
     
     private:
@@ -79,11 +107,15 @@ class Robot_Commander : public rclcpp::Node {
             
             stop_robot();
             current_mode = new_mode;
+            pub_mode();
 
+            RCLCPP_INFO(this->get_logger(), "모드 전환 -> %s", current_mode.c_str());
+        }
+
+        void pub_mode () {
             std_msgs::msg::String mode_msg;
             mode_msg.data = current_mode;
             mode_pub->publish(mode_msg);
-            RCLCPP_INFO(this->get_logger(), "현재 모드 : %s", current_mode.c_str());
         }
 
         void stop_robot() {
@@ -104,9 +136,7 @@ class Robot_Commander : public rclcpp::Node {
         }
 
         // ㅡㅡㅡㅡ LiDAR ㅡㅡㅡㅡ
-        void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) {
-            latest_scan = msg;
-        }
+        void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) { latest_scan = msg; }
 
         // ㅡㅡㅡㅡ 제스쳐 인식 / 처리 ㅡㅡㅡㅡ
         void gesture_callback(const std_msgs::msg::Int32MultiArray::SharedPtr msg) {
@@ -162,37 +192,30 @@ class Robot_Commander : public rclcpp::Node {
 
             double offset = msg->data;
             double angle_radian = -offset * (camera_rad / 2.0);
-            double target_distance = angle_to_distance(angle_radian);
+            double distance = angle_to_distance(angle_radian);
 
-            if (std::isfinite(target_distance) && target_distance < 5.0) {
-                double target_x = target_distance * std::cos(angle_radian);
-                double target_y = target_distance * std::sin(angle_radian);
+            if (std::isfinite(distance) || distance >= 5.0) { return; }
 
-                geometry_msgs::msg::PoseStamped target_pose;
-                target_pose.header.stamp = this->now();
-                target_pose.header.frame_id = "base_link";
-                target_pose.pose.position.x = target_x;
-                target_pose.pose.position.y = target_y;
+            geometry_msgs::msg::PoseStamped target;
+            target.header.stamp = this->now();
+            target.header.frame_id = "base_link";
+            target.pose.position.x = distance * std::cos(angle_radian);
+            target.pose.position.y = distance * std::sin(angle_radian);
+            target.pose.orientation.w = 1.0;
 
-                follow_target_pub->publish(target_pose);
-            }
+            follow_target_pub->publish(target);
         }
         
         // ㅡㅡㅡㅡ 거리 계산 ㅡㅡㅡㅡ
         double angle_to_distance(double target_angle_radian) {
             if (!latest_scan || latest_scan->ranges.empty()) { return std::numeric_limits<double>::infinity(); }
 
-            double angle_min = latest_scan->angle_min;
-            double angle_increment = latest_scan->angle_increment;
-            int total_ray = latest_scan->ranges.size();
-
-            double diff = target_angle_radian - angle_min;
-            int target_idx = static_cast<int>(std::round(diff / angle_increment));
-            target_idx = std::max(0, std::min(target_idx, total_ray -1));
+            int total_ray = static_cast<int>(latest_scan->ranges.size());
+            int target_idx = static_cast<int>(std::round(target_angle_radian - latest_scan->angle_min / latest_scan->angle_increment));
+            target_idx = std::max(0, std::min(target_idx, total_ray -1));           
 
             int count = 0;
             double sum = 0.0;
-
             for (int i= -5; i <= 5; i++){
                 int idx = target_idx + i;
                 if (idx < 0 || idx >= total_ray) { continue; }
@@ -206,10 +229,12 @@ class Robot_Commander : public rclcpp::Node {
             return (count > 0) ? (sum / count) : std::numeric_limits<double>::infinity();
         }
 
-        int last_x = -1;
-        double camera_rad = 1.047; // 약 60도
-
         std::string current_mode;
+
+        int last_x;
+        double camera_rad; // 약 60도
+
+        sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
 
         rclcpp::Publisher<std_msgs::msg::String>::SharedPtr mode_pub;
         rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr gesture_cmd_pub;
@@ -219,12 +244,12 @@ class Robot_Commander : public rclcpp::Node {
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
         rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr gesture_sub;
         rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr human_offset_sub;
-        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav2_status_sub;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr call_sub;
+        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav2_status_sub;
 
-        sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
-
+        rclcpp::TimerBase::SharedPtr init_timer;
         rclcpp::TimerBase::SharedPtr sim_timer;
+        rclcpp::TimerBase::SharedPtr gesture_timer;
 };
 
 int main(int argc, char * argv[]) {

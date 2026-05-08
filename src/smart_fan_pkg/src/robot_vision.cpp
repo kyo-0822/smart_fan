@@ -18,8 +18,8 @@ using namespace std::chrono_literals;
 class RobotVision : public rclcpp::Node {
     public:
         RobotVision() : Node("robot_vision_node"),
+                        frame_counter(0),   
                         current_mode("waiting"),
-                        frame_counter(0),
                         camA_ready(false) {
             // ㅡㅡㅡㅡ Yolo 모델 ㅡㅡㅡㅡ
             this->declare_parameter("model_path", "/home/handsome/handsome_ws/src/handsome_pkg/tired_human.v3i.yolov8/runs/detect/yolo_model/weights/best.onnx");
@@ -58,6 +58,7 @@ class RobotVision : public rclcpp::Node {
                 cam_B.set(cv::CAP_PROP_FPS, 30);
                 RCLCPP_INFO(this->get_logger(), "cam_B 연결 성공");
             }
+
             timer = this->create_wall_timer(100ms, std::bind(&RobotVision::vision_loop, this));
             
             RCLCPP_INFO(this->get_logger(), "robot_vision 노드 활성화 ...");
@@ -68,6 +69,14 @@ class RobotVision : public rclcpp::Node {
             if (current_mode != msg->data) {
                 current_mode = msg->data;
                 frame_counter = 0; // 모드 전환시 프레임 초기화
+
+                if (current_mode == "gesture" || current_mode == "auto_drive") {
+                    if (cam_B.isOpened()) {
+                        cv::Mat dummy;
+                        for (int i = 0; i < 5; i++) { cam_B.read(dummy); }
+                    }
+                }
+
                 RCLCPP_INFO(this->get_logger(), "모드 전환 %s", current_mode.c_str());
             }
         }
@@ -75,7 +84,7 @@ class RobotVision : public rclcpp::Node {
         void cam_a_callback(const sensor_msgs::msg::CompressedImage::SharedPtr msg) {
             try {
                 cv::Mat decoded = cv::imdecode(cv::Mat(msg->data), cv::IMREAD_COLOR);
-                if (!camA_frame.empty()) {
+                if (!decoded.empty()) {
                     camA_frame = decoded;
                     camA_ready = true;
                 }
@@ -85,6 +94,8 @@ class RobotVision : public rclcpp::Node {
         }
 
         void vision_loop() {
+            if (current_mode == "waiting" || current_mode == "auto_drive") { return; }
+
             cv::Mat frame_A, frame_B;
             bool has_A = false, has_B = false;
 
@@ -95,26 +106,25 @@ class RobotVision : public rclcpp::Node {
             }
             if (cam_B.isOpened()) { has_B = cam_B.read(frame_B); }
 
-            if (current_mode == "waiting" || current_mode == "auto_drive") { return; }
-            
             if(current_mode == "gesture") {
                 if (has_B) {
-                    process_gesture_detection(frame_B);
+                    process_gesture_detection(frame_B, false);
                     cv::imshow("camB", frame_B);
                 }
             } else if (current_mode == "follow") {
-                if (frame_counter < 50) { // follow 모드일때 5프레임 단위로 카메라 스위칭
+                bool use_cam_b = ((frame_counter / 5) % 2 == 1);
+                if (!use_cam_b) {
                     if (has_A) {
                         process_human_detection(frame_A);
                         cv::imshow("camA", frame_A);
                     }
                 } else {
                     if (has_B) {
-                        process_gesture_detection(frame_B);
+                        process_gesture_detection(frame_B, true);
                         cv::imshow("camB", frame_B);
                     }
                 }
-                frame_counter = (frame_counter + 1) % 100;
+                frame_counter = (frame_counter + 1) % 10;
             }
             cv::waitKey(1);
         }
@@ -131,7 +141,6 @@ class RobotVision : public rclcpp::Node {
 
             const int dimensions = outputs[0].size[1];
             const int rows = outputs[0].size[2];
-
             if (dimensions < 9) return;
 
             float* data = (float*)outputs[0].data;
@@ -161,7 +170,6 @@ class RobotVision : public rclcpp::Node {
 
                 int zone = static_cast<int>(std::round((offset + 1.0) / 2.0 * 4.0));
                 zone = std::max(0, std::min(zone, 4));
-
                 auto zone_msg = std_msgs::msg::Int32();
                 zone_msg.data = zone;
                 yolo_zone_pub->publish(zone_msg);
@@ -178,7 +186,7 @@ class RobotVision : public rclcpp::Node {
             }
         }
 
-        void process_gesture_detection(cv::Mat& frame) {
+        void process_gesture_detection(cv::Mat& frame, bool fist_only) {
             cv::Mat blob;
             cv::dnn::blobFromImage(frame, blob, 1.0/255.0, cv::Size(640, 640), cv::Scalar(), true, false);
             yolo_net.setInput(blob);
@@ -190,7 +198,6 @@ class RobotVision : public rclcpp::Node {
 
             const int dimensions = outputs[0].size[1];
             const int rows = outputs[0].size[2];
-
             if (dimensions < 8) { return; }
 
             float* data = (float*)outputs[0].data;
@@ -211,30 +218,31 @@ class RobotVision : public rclcpp::Node {
                 }
             }
 
-            if (detected_class_id >= 0 && detected_class_id <= 3) {
-                double scale = static_cast<double>(frame.cols) / 640.0;
-                int real_center_x = static_cast<int>(std::round(bbox_center_x * scale)); 
+            if (detected_class_id < 0) { return; }
+            if (fist_only && detected_class_id != 3) { return; }
 
-                auto gesture_msg = std_msgs::msg::Int32MultiArray();
-                gesture_msg.data.push_back(detected_class_id);
-                gesture_msg.data.push_back(real_center_x);
-                gesture_pub->publish(gesture_msg);
+            double scale = static_cast<double>(frame.cols) / 640.0;
+            int real_center_x = static_cast<int>(std::round(bbox_center_x * scale)); 
 
-                // ㅡㅡㅡㅡ 감지 결과 시각화 ㅡㅡㅡㅡ
-                const std::vector<std::string> class_names =
-                    {"Palm", "Back", "Finger", "Fist"};
-                cv::putText(frame,
-                    class_names[detected_class_id]
-                        + " (" + std::to_string((int)(best_confidence * 100)) + "%)",
-                    cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX,
-                    1.0, cv::Scalar(0, 0, 255), 2);
-            }
+            auto gesture_msg = std_msgs::msg::Int32MultiArray();
+            gesture_msg.data.push_back(detected_class_id);
+            gesture_msg.data.push_back(real_center_x);
+            gesture_pub->publish(gesture_msg);
+
+            // ㅡㅡㅡㅡ 감지 결과 시각화 ㅡㅡㅡㅡ
+            const std::vector<std::string> class_names =
+                {"Palm", "Back", "Finger", "Fist"};
+            cv::putText(frame,
+                class_names[detected_class_id]
+                    + " (" + std::to_string((int)(best_confidence * 100)) + "%)",
+                cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX,
+                1.0, cv::Scalar(0, 0, 255), 2);
         }
         
         int frame_counter;
-        bool camA_ready;
         std::string current_mode;
-
+        bool camA_ready;
+        
         cv::VideoCapture cam_B;
         cv::Mat camA_frame;
         cv::dnn::Net yolo_net;
@@ -242,6 +250,7 @@ class RobotVision : public rclcpp::Node {
         rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr human_offset_pub;
         rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr yolo_zone_pub;
         rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr gesture_pub;
+
         rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub;
         rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr cam_a_sub;
         rclcpp::TimerBase::SharedPtr timer;
