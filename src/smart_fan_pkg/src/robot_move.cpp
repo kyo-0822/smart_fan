@@ -98,7 +98,7 @@ class Robot_move : public rclcpp::Node {
         }
 
         void gesture_cmd_callback(const geometry_msgs::msg::Twist::SharedPtr msg) {
-            if (current_mode != "gesture") { return; }
+            if (current_mode != "gesture" && current_mode != "follow") { return; }
 
             cmd_vel_pub->publish(*msg);
             prev_linear_v = msg->linear.x;

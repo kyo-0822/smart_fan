@@ -85,7 +85,7 @@ class Robot_Commander : public rclcpp::Node {
                     auto goal_pose = geometry_msgs::msg::PoseStamped();
                     goal_pose.header.stamp    = this->now();
                     goal_pose.header.frame_id = "map";
-                    goal_pose.pose.position.x = 2.46;   // ✅ 목적지 좌표
+                    goal_pose.pose.position.x = 2.46;
                     goal_pose.pose.position.y = -2.62;
                     goal_pose.pose.orientation.w = 1.0;
 
@@ -94,9 +94,7 @@ class Robot_Commander : public rclcpp::Node {
                     );
 
                     // 한 번만 실행하고 타이머 종료
-                    if (this->sim_timer) {
-                        this->sim_timer->cancel();
-                    }
+                    if (this->sim_timer) { this->sim_timer->cancel(); }
                 }
             );
         }
@@ -191,21 +189,37 @@ class Robot_Commander : public rclcpp::Node {
             if (current_mode != "follow") { return; }
 
             double offset = msg->data;
+            // zone0 : -1.0 ~ -0.6 (좌회전)
+            if (offset < -0.6) {
+                geometry_msgs::msg::Twist align_cmd;
+                align_cmd.angular.z = 0.4;
+                gesture_cmd_pub->publish(align_cmd);
+                return;
+            }
+
+            // zone4 : 0.6 ~ 1.0 (우회전)
+            if (offset > 0.6) {
+                geometry_msgs::msg::Twist align_cmd;
+                align_cmd.angular.z = -0.4;
+                gesture_cmd_pub->publish(align_cmd);
+                return;
+            }
+
+            // zone 1~3 : 중앙 (LiDAR)
             double angle_radian = -offset * (camera_rad / 2.0);
             double distance = angle_to_distance(angle_radian);
 
-            if (std::isfinite(distance) || distance >= 5.0) { return; }
+            if (std::isfinite(distance) && distance < 5.0) {
+                geometry_msgs::msg::PoseStamped target;
+                target.header.stamp = this->now();
+                target.header.frame_id = "base_link";
+                target.pose.position.x = distance * std::cos(angle_radian);
+                target.pose.position.y = distance * std::sin(angle_radian);
 
-            geometry_msgs::msg::PoseStamped target;
-            target.header.stamp = this->now();
-            target.header.frame_id = "base_link";
-            target.pose.position.x = distance * std::cos(angle_radian);
-            target.pose.position.y = distance * std::sin(angle_radian);
-            target.pose.orientation.w = 1.0;
-
-            follow_target_pub->publish(target);
+                follow_target_pub->publish(target);
+            }
         }
-        
+            
         // ㅡㅡㅡㅡ 거리 계산 ㅡㅡㅡㅡ
         double angle_to_distance(double target_angle_radian) {
             if (!latest_scan || latest_scan->ranges.empty()) { return std::numeric_limits<double>::infinity(); }

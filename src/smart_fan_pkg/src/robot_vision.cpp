@@ -147,21 +147,30 @@ class RobotVision : public rclcpp::Node {
 
             bool human_detected = false;
             double best_confidence = 0.0; // 신뢰도
+
+            // 바운딩 박스
+            double bbox_w = 0.0, bbox_cy = 0.0, bbox_h = 0.0;
             double bbox_center_x = -1.0;
+            
 
             for (int i = 0; i < rows; i++) {
                 float confidence = data[8 * rows + i];
                 if (confidence > 0.6 && confidence > best_confidence) {
                     best_confidence = confidence;
                     bbox_center_x = data[0 * rows + i];
+                    bbox_cy = data[1 * raws + i];
+                    bbox_w = data[2 * raws + i];
+                    bbox_h = data[3 * raws + i];
                     human_detected = true;
                 }
             }
 
             // 사람이 감지되면 사람이 화면 중앙에 오도록
             if (human_detected) {
-                double scale = static_cast<double>(frame.cols) / 640.0;
-                double real_center_x = bbox_center_x * scale;
+                double scale_x = static_cast<double>(frame.cols) / 640.0;
+                double scale_y = static_cast<double>(frame.rows) / 640.0;
+
+                double real_center_x = bbox_center_x * scale_x;
                 double offset = (real_center_x - (frame.cols / 2.0)) / (frame.cols / 2.0);
 
                 auto offset_msg = std_msgs::msg::Float64();
@@ -174,15 +183,28 @@ class RobotVision : public rclcpp::Node {
                 zone_msg.data = zone;
                 yolo_zone_pub->publish(zone_msg);
 
-                // ㅡㅡㅡㅡ 감지 결과 시각화 ㅡㅡㅡㅡ
-                cv::circle(frame,
-                    cv::Point(static_cast<int>(real_center_x), frame.rows / 2),
-                    8, cv::Scalar(0, 255, 0), -1);
+                // 바운딩 박스 계산
+                int x1 = static_case<int>((bbox_center_x - bbox_w / 2.0) * scale_x);
+                int y1 = static_case<int>((bbox_cy - bbox_h / 2.0) * scale_y);
+                int x2 = static_case<int>((bbox_center_x - bbox_w / 2.0) * scale_x);
+                int y2 = static_case<int>((bbox_cy - bbox_h / 2.0) * scale_y);
+
+                x1 = std::max(0, x1); y1 = std::max(0, y1);
+                x2 = std::min(frame.cols - 1, x2);
+                y2 = std::min(frame.rows - 1, y2);
+
+                cv::Scalar bbox_color;
+                if (zone==0) { bbox_color = cv::Scalar(255, 0, 0); } // 파랑 : 좌회전
+                else if (zone == 4) { bbox_color = cv::Scalar(0, 0, 255); } // 빨강 : 우회전
+                else { bbox_color = cv::Scalar(0, 255, 0); } // 초록 : 정지
+
+                cv::rectangle(frame, cv::Point(x1, y1), cv::Point(x2, y2), bbox_color, 2);
 
                 cv::putText(frame,
-                    "Human zone:" + std::to_string(zone),
-                    cv::Point(10, 30), cv::FONT_HERSHEY_SIMPLEX,
-                    1.0, cv::Scalar(0, 255, 0), 2);
+                    "Human : " + std::to_string((int)(best_confidence * 100)) + "%",
+                    cv::Point(x1, std::max(y1 - 10, 15)),
+                    cv::FONT_HERSHEY_SIMPLEX, 0.6, bbox_color, 2
+                );
             }
         }
 
@@ -231,7 +253,7 @@ class RobotVision : public rclcpp::Node {
 
             // ㅡㅡㅡㅡ 감지 결과 시각화 ㅡㅡㅡㅡ
             const std::vector<std::string> class_names =
-                {"Palm", "Back", "Finger", "Fist"};
+                {"Stop", "Come", "Back", "Mode_Change"};
             cv::putText(frame,
                 class_names[detected_class_id]
                     + " (" + std::to_string((int)(best_confidence * 100)) + "%)",
