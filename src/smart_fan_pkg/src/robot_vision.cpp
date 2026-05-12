@@ -9,8 +9,8 @@
 #include "rclcpp/rclcpp.hpp"
 #include "std_msgs/msg/int32.hpp"
 #include "std_msgs/msg/string.hpp"
-#include "std_msgs/msg/float64.hpp"
 #include "std_msgs/msg/int32_multi_array.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 #include "sensor_msgs/msg/compressed_image.hpp"
 
 using namespace std::chrono_literals;
@@ -33,9 +33,11 @@ class RobotVision : public rclcpp::Node {
             }
 
             // ㅡㅡㅡㅡ publisher ㅡㅡㅡㅡ
-            human_offset_pub = this->create_publisher<std_msgs::msg::Float64>("human_offset", 10);
+            human_offset_pub = this->create_publisher<std_msgs::msg::Float64MultiArray>("human_offset", 10);
             yolo_zone_pub = this->create_publisher<std_msgs::msg::Int32>("yolo_zone", 10);
             gesture_pub = this->create_publisher<std_msgs::msg::Int32MultiArray>("gesture_data", 10);
+            camA_display_pub = this->create_publisher<sensor_msgs::msg::CompressedImage>("camA_display", 10);
+            camB_display_pub = this->create_publisher<sensor_msgs::msg::CompressedImage>("camB_display", 10);
 
             // ㅡㅡㅡㅡ subscription ㅡㅡㅡㅡ
             mode_sub = this->create_subscription<std_msgs::msg::String>(
@@ -45,12 +47,13 @@ class RobotVision : public rclcpp::Node {
             
             // 터틀봇3 카메라
             cam_a_sub = this->create_subscription<sensor_msgs::msg::CompressedImage>(
-                "/camera/image_raw/compressed", rclcpp::SensorDataQoS(),
+                "/image_raw/compressed", rclcpp::SensorDataQoS(),
                 std::bind(&RobotVision::cam_a_callback, this, std::placeholders::_1)
             );
+            RCLCPP_INFO(this->get_logger(), "Cam_A ready");
 
             // ros2 PC 카메라
-            cam_B.open(0, cv::CAP_V4L2);
+            cam_B.open(1, cv::CAP_V4L2);
             if (!cam_B.isOpened()) {
                 RCLCPP_ERROR(this->get_logger(), "cam_B 연결 실패");
             } else {
@@ -76,8 +79,6 @@ class RobotVision : public rclcpp::Node {
                         for (int i = 0; i < 5; i++) { cam_B.read(dummy); }
                     }
                 }
-
-                RCLCPP_INFO(this->get_logger(), "모드 전환 %s", current_mode.c_str());
             }
         }
 
@@ -94,8 +95,6 @@ class RobotVision : public rclcpp::Node {
         }
 
         void vision_loop() {
-            if (current_mode == "waiting" || current_mode == "auto_drive") { return; }
-
             cv::Mat frame_A, frame_B;
             bool has_A = false, has_B = false;
 
@@ -103,30 +102,40 @@ class RobotVision : public rclcpp::Node {
                 frame_A = camA_frame.clone();
                 has_A = true;
                 camA_ready = false;
+                
             }
             if (cam_B.isOpened()) { has_B = cam_B.read(frame_B); }
 
-            if(current_mode == "gesture") {
-                if (has_B) {
-                    process_gesture_detection(frame_B, false);
-                    cv::imshow("camB", frame_B);
-                }
-            } else if (current_mode == "follow") {
-                bool use_cam_b = ((frame_counter / 5) % 2 == 1);
-                if (!use_cam_b) {
-                    if (has_A) {
-                        process_human_detection(frame_A);
-                        cv::imshow("camA", frame_A);
-                    }
-                } else {
+            if (current_mode != "waiting" && current_mode != "auto_drive") {
+                if(current_mode == "gesture") {
                     if (has_B) {
-                        process_gesture_detection(frame_B, true);
-                        cv::imshow("camB", frame_B);
+                        process_gesture_detection(frame_B, false);
                     }
+                } else if (current_mode == "follow") {
+                    bool use_cam_b = ((frame_counter / 1) % 2 == 1);
+                    if (!use_cam_b) {
+                        if (has_A) { process_human_detection(frame_A); }
+                    } else {
+                        if (has_B) { process_gesture_detection(frame_B, true); }
+                    }
+                    frame_counter = (frame_counter + 1) % 10;
                 }
-                frame_counter = (frame_counter + 1) % 10;
             }
-            cv::waitKey(1);
+            auto publish_frame = [&](cv::Mat& frame,
+            rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr& pub) {
+                std::vector<uchar> buf;
+                cv::imencode(".jpg", frame, buf);
+                sensor_msgs::msg::CompressedImage msg;
+                msg.header.stamp = this->now();
+                msg.format = "jpeg";
+                msg.data = buf;
+                pub->publish(msg);
+            };
+
+            if(has_A) { publish_frame(frame_A, camA_display_pub); }
+            if(has_B) { publish_frame(frame_B, camB_display_pub); }
+
+            // cv::waitKey(1);
         }
 
         void process_human_detection(cv::Mat& frame) {
@@ -141,71 +150,85 @@ class RobotVision : public rclcpp::Node {
 
             const int dimensions = outputs[0].size[1];
             const int rows = outputs[0].size[2];
-            if (dimensions < 9) return;
+
+            if (dimensions < 5) { return; }
+
+            const int num_class = dimensions - 4;
 
             float* data = (float*)outputs[0].data;
 
             bool human_detected = false;
             double best_confidence = 0.0; // 신뢰도
+            int detected_class_id = -1;
 
             // 바운딩 박스
             double bbox_w = 0.0, bbox_cy = 0.0, bbox_h = 0.0;
             double bbox_center_x = -1.0;
-            
 
             for (int i = 0; i < rows; i++) {
-                float confidence = data[8 * rows + i];
-                if (confidence > 0.6 && confidence > best_confidence) {
-                    best_confidence = confidence;
+                float max_class_score = -1.0f;
+                int class_id = -1;
+
+                for (int c = 0; c < num_class; c++) {
+                    float score = data[(4 + c) * rows + i];
+                    if (score > max_class_score) {
+                        max_class_score = score;
+                        class_id = c;
+                    }
+                }
+
+                if (max_class_score > 0.6 && max_class_score > best_confidence) {
+                    best_confidence = max_class_score;
+                    detected_class_id = class_id;
                     bbox_center_x = data[0 * rows + i];
-                    bbox_cy = data[1 * raws + i];
-                    bbox_w = data[2 * raws + i];
-                    bbox_h = data[3 * raws + i];
+                    bbox_cy = data[1 * rows + i];
+                    bbox_w = data[2 * rows + i];
+                    bbox_h = data[3 * rows + i];
                     human_detected = true;
                 }
             }
 
             // 사람이 감지되면 사람이 화면 중앙에 오도록
-            if (human_detected) {
-                double scale_x = static_cast<double>(frame.cols) / 640.0;
-                double scale_y = static_cast<double>(frame.rows) / 640.0;
+            if (!human_detected || detected_class_id != 4) { return; }
 
-                double real_center_x = bbox_center_x * scale_x;
-                double offset = (real_center_x - (frame.cols / 2.0)) / (frame.cols / 2.0);
+            double scale_x = static_cast<double>(frame.cols) / 640.0;
+            double scale_y = static_cast<double>(frame.rows) / 640.0;
 
-                auto offset_msg = std_msgs::msg::Float64();
-                offset_msg.data = offset;
-                human_offset_pub->publish(offset_msg);
+            double real_center_x = bbox_center_x * scale_x;
+            double offset = (real_center_x - (frame.cols / 2.0)) / (frame.cols / 2.0);
 
-                int zone = static_cast<int>(std::round((offset + 1.0) / 2.0 * 4.0));
-                zone = std::max(0, std::min(zone, 4));
-                auto zone_msg = std_msgs::msg::Int32();
-                zone_msg.data = zone;
-                yolo_zone_pub->publish(zone_msg);
+            auto offset_msg = std_msgs::msg::Float64MultiArray();
+            offset_msg.data = {offset, (double)detected_class_id };
+            human_offset_pub->publish(offset_msg);
 
-                // 바운딩 박스 계산
-                int x1 = static_case<int>((bbox_center_x - bbox_w / 2.0) * scale_x);
-                int y1 = static_case<int>((bbox_cy - bbox_h / 2.0) * scale_y);
-                int x2 = static_case<int>((bbox_center_x - bbox_w / 2.0) * scale_x);
-                int y2 = static_case<int>((bbox_cy - bbox_h / 2.0) * scale_y);
+            int zone = static_cast<int>(std::round((offset + 1.0) / 2.0 * 4.0));
+            zone = std::max(0, std::min(zone, 4));
+            auto zone_msg = std_msgs::msg::Int32();
+            zone_msg.data = zone;
+            yolo_zone_pub->publish(zone_msg);
 
-                x1 = std::max(0, x1); y1 = std::max(0, y1);
-                x2 = std::min(frame.cols - 1, x2);
-                y2 = std::min(frame.rows - 1, y2);
+            // 바운딩 박스 계산
+            int x1 = cvRound((bbox_center_x - bbox_w / 2.0) * scale_x);
+            int y1 = cvRound((bbox_cy - bbox_h / 2.0) * scale_y);
+            int x2 = cvRound((bbox_center_x + bbox_w / 2.0) * scale_x);
+            int y2 = cvRound((bbox_cy + bbox_h / 2.0) * scale_y);
 
-                cv::Scalar bbox_color;
-                if (zone==0) { bbox_color = cv::Scalar(255, 0, 0); } // 파랑 : 좌회전
-                else if (zone == 4) { bbox_color = cv::Scalar(0, 0, 255); } // 빨강 : 우회전
-                else { bbox_color = cv::Scalar(0, 255, 0); } // 초록 : 정지
+            x1 = std::max(0, x1); y1 = std::max(0, y1);
+            x2 = std::min(frame.cols - 1, x2);
+            y2 = std::min(frame.rows - 1, y2);
 
-                cv::rectangle(frame, cv::Point(x1, y1), cv::Point(x2, y2), bbox_color, 2);
+            cv::Scalar bbox_color;
+            if (zone==0) { bbox_color = cv::Scalar(255, 0, 0); } // 파랑 : 좌회전
+            else if (zone == 4) { bbox_color = cv::Scalar(0, 0, 255); } // 빨강 : 우회전
+            else { bbox_color = cv::Scalar(0, 255, 0); } // 초록 : 정지
 
-                cv::putText(frame,
-                    "Human : " + std::to_string((int)(best_confidence * 100)) + "%",
-                    cv::Point(x1, std::max(y1 - 10, 15)),
-                    cv::FONT_HERSHEY_SIMPLEX, 0.6, bbox_color, 2
-                );
-            }
+            cv::rectangle(frame, cv::Point(x1, y1), cv::Point(x2, y2), bbox_color, 2);
+
+            cv::putText(frame,
+                "Human : " + std::to_string((int)(best_confidence * 100)) + "%",
+                cv::Point(x1, std::max(y1 - 10, 15)),
+                cv::FONT_HERSHEY_SIMPLEX, 0.6, bbox_color, 2
+            );
         }
 
         void process_gesture_detection(cv::Mat& frame, bool fist_only) {
@@ -269,9 +292,11 @@ class RobotVision : public rclcpp::Node {
         cv::Mat camA_frame;
         cv::dnn::Net yolo_net;
 
-        rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr human_offset_pub;
+        rclcpp::Publisher<std_msgs::msg::Float64MultiArray>::SharedPtr human_offset_pub;
         rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr yolo_zone_pub;
         rclcpp::Publisher<std_msgs::msg::Int32MultiArray>::SharedPtr gesture_pub;
+        rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr camA_display_pub;
+        rclcpp::Publisher<sensor_msgs::msg::CompressedImage>::SharedPtr camB_display_pub;
 
         rclcpp::Subscription<std_msgs::msg::String>::SharedPtr mode_sub;
         rclcpp::Subscription<sensor_msgs::msg::CompressedImage>::SharedPtr cam_a_sub;

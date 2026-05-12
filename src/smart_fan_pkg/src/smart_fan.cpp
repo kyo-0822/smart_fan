@@ -52,7 +52,6 @@ class Smart_Fan : public rclcpp::Node {
         void mode_callback(const std_msgs::msg::String::SharedPtr msg) {
             if (current_mode != msg->data) {
                 current_mode = msg->data;
-                RCLCPP_INFO(this->get_logger(), "모드 전환 -> %s", current_mode.c_str());
             }
         }
 

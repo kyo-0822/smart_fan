@@ -10,9 +10,10 @@
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
 #include "sensor_msgs/msg/laser_scan.hpp"
-#include "std_msgs/msg/int32_multi_array.hpp"
-#include "std_msgs/msg/float64.hpp"
+
 #include "std_msgs/msg/string.hpp"
+#include "std_msgs/msg/int32_multi_array.hpp"
+#include "std_msgs/msg/float64_multi_array.hpp"
 
 using namespace std::chrono_literals;
 
@@ -36,7 +37,7 @@ class Robot_Commander : public rclcpp::Node {
                 "gesture_data", 10,
                 std::bind(&Robot_Commander::gesture_callback, this, std::placeholders::_1)
             );
-            human_offset_sub = this->create_subscription<std_msgs::msg::Float64>(
+            human_offset_sub = this->create_subscription<std_msgs::msg::Float64MultiArray>(
                 "human_offset", 10,
                 std::bind(&Robot_Commander::human_offset_callback, this, std::placeholders::_1)
             );
@@ -59,34 +60,15 @@ class Robot_Commander : public rclcpp::Node {
                 }
             );
 
-            // // 제자리에서 바로 제스쳐로 전환
-            // sim_timer = this->create_wall_timer(
-            //     5s, [this]() -> void {
-            //         RCLCPP_INFO(this->get_logger(), "테스트: auto_drive 전환");
-            //         set_mode("auto_drive");
-
-            //         // 3초 뒤 gesture 모드로 전환
-            //         gesture_timer = this->create_wall_timer(
-            //             3s, [this]() -> void {
-            //                 RCLCPP_INFO(this->get_logger(), "테스트: gesture 전환");
-            //                 set_mode("gesture");
-            //                 if (this->gesture_timer) { this->gesture_timer->cancel(); }
-            //             }
-            //         );
-
-            //         if (this->sim_timer) { this->sim_timer->cancel(); }
-            //     }
-            // );
-
             sim_timer = this->create_wall_timer(
-                5s, [this]() -> void {
-                    RCLCPP_INFO(this->get_logger(), "5초 경과 → auto_drive 모드 시작");
+                10s, [this]() -> void {
+                    RCLCPP_INFO(this->get_logger(), "10초 경과 → auto_drive 모드 시작");
 
                     auto goal_pose = geometry_msgs::msg::PoseStamped();
                     goal_pose.header.stamp    = this->now();
                     goal_pose.header.frame_id = "map";
-                    goal_pose.pose.position.x = 2.46;
-                    goal_pose.pose.position.y = -2.62;
+                    goal_pose.pose.position.x = 2.29;
+                    goal_pose.pose.position.y = -2.64;
                     goal_pose.pose.orientation.w = 1.0;
 
                     this->call_request_callback(
@@ -145,9 +127,12 @@ class Robot_Commander : public rclcpp::Node {
 
             // class_id : 3 (주먹)으로 모드 전환
             if (class_id == 3) {
-                if      (current_mode == "gesture") { set_mode("follow"); }
+                if (current_mode == "gesture") {
+                    set_mode("follow");
+                }
+
                 else if ( current_mode == "follow") { set_mode("gesture"); }
-                last_x = -1;
+
                 return;
             }
 
@@ -155,27 +140,23 @@ class Robot_Commander : public rclcpp::Node {
             if (current_mode != "gesture") { return; }
 
             geometry_msgs::msg::Twist cmd;
+            // const int w = 640;
+            int zone = 640 / 3;
 
             // 클래스 동작 (0:손바닥, 1:손등, 2:손가락, 3:주먹)
             switch (class_id) {
                 case 0: // 손바닥 ( 정지 / 회전 )
-                    if (last_x > 0) {
-                        int diff = current_x - last_x;
-                        if      (diff < -20) { cmd.angular.z = 0.5; }
-                        else if (diff > 20)  { cmd.angular.z = -0.5; }
-                        else                 { cmd.linear.x = 0.0; cmd.angular.z = 0.0; }
-                    }
-                    last_x = current_x;
+                    if (current_x < zone) { cmd.angular.z = 1.0; } // 1/3 지점
+                    else if (current_x > zone * 2) { cmd.angular.z = -1.0; } // 3/3 지점
+                    else { cmd.linear.x = 0.0; cmd.angular.z = 0.0; }
                     break;
 
                 case 1: // 손등 (전진)
                     cmd.linear.x = 0.2;
-                    last_x = -1;
                     break;
 
                 case 2: // 손가락 (후진)
                     cmd.linear.x = -0.2;
-                    last_x = -1;
                     break;
 
                 default:
@@ -185,39 +166,31 @@ class Robot_Commander : public rclcpp::Node {
         }
 
         // ㅡㅡㅡㅡ 사람 추종 ㅡㅡㅡㅡ
-        void human_offset_callback(const std_msgs::msg::Float64::SharedPtr msg) {
+        void human_offset_callback(const std_msgs::msg::Float64MultiArray::SharedPtr msg) {
             if (current_mode != "follow") { return; }
+            if (msg->data.size() < 2) { return; }
+            
+            double offset = msg->data[0];
+            int class_id = (int)msg->data[1];
+            if (class_id != 4) { return; }
 
-            double offset = msg->data;
-            // zone0 : -1.0 ~ -0.6 (좌회전)
-            if (offset < -0.6) {
-                geometry_msgs::msg::Twist align_cmd;
-                align_cmd.angular.z = 0.4;
-                gesture_cmd_pub->publish(align_cmd);
-                return;
+            double target_angle = -offset * (camera_rad / 2.0);
+            double target_distance = angle_to_distance(target_angle);
+            bool close = !std::isfinite(target_distance) || target_distance <= 0.4;
+            
+            geometry_msgs::msg::Twist cmd;
+
+            if (offset < -0.6) { // zone0 : -1.0 ~ -0.6 (좌회전)
+                cmd.angular.z = 0.4;
+                if (!close) { cmd.linear.x = 0.1; }
+            } else if (offset > 0.6) {
+                cmd.angular.z = -0.4;
+                if (!close) { cmd.linear.x = 0.1; }
+            } else {
+                cmd.angular.z = -offset * 0.5;
+                if (!close) { cmd.linear.x = 0.2; }
             }
-
-            // zone4 : 0.6 ~ 1.0 (우회전)
-            if (offset > 0.6) {
-                geometry_msgs::msg::Twist align_cmd;
-                align_cmd.angular.z = -0.4;
-                gesture_cmd_pub->publish(align_cmd);
-                return;
-            }
-
-            // zone 1~3 : 중앙 (LiDAR)
-            double angle_radian = -offset * (camera_rad / 2.0);
-            double distance = angle_to_distance(angle_radian);
-
-            if (std::isfinite(distance) && distance < 5.0) {
-                geometry_msgs::msg::PoseStamped target;
-                target.header.stamp = this->now();
-                target.header.frame_id = "base_link";
-                target.pose.position.x = distance * std::cos(angle_radian);
-                target.pose.position.y = distance * std::sin(angle_radian);
-
-                follow_target_pub->publish(target);
-            }
+            gesture_cmd_pub->publish(cmd);
         }
             
         // ㅡㅡㅡㅡ 거리 계산 ㅡㅡㅡㅡ
@@ -225,7 +198,7 @@ class Robot_Commander : public rclcpp::Node {
             if (!latest_scan || latest_scan->ranges.empty()) { return std::numeric_limits<double>::infinity(); }
 
             int total_ray = static_cast<int>(latest_scan->ranges.size());
-            int target_idx = static_cast<int>(std::round(target_angle_radian - latest_scan->angle_min / latest_scan->angle_increment));
+            int target_idx = static_cast<int>(std::round((target_angle_radian - latest_scan->angle_min) / latest_scan->angle_increment));
             target_idx = std::max(0, std::min(target_idx, total_ray -1));           
 
             int count = 0;
@@ -245,8 +218,7 @@ class Robot_Commander : public rclcpp::Node {
 
         std::string current_mode;
 
-        int last_x;
-        double camera_rad; // 약 60도
+        double camera_rad = 1.047; // 약 60도
 
         sensor_msgs::msg::LaserScan::SharedPtr latest_scan;
 
@@ -257,13 +229,12 @@ class Robot_Commander : public rclcpp::Node {
 
         rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr scan_sub;
         rclcpp::Subscription<std_msgs::msg::Int32MultiArray>::SharedPtr gesture_sub;
-        rclcpp::Subscription<std_msgs::msg::Float64>::SharedPtr human_offset_sub;
+        rclcpp::Subscription<std_msgs::msg::Float64MultiArray>::SharedPtr human_offset_sub;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr call_sub;
         rclcpp::Subscription<std_msgs::msg::String>::SharedPtr nav2_status_sub;
 
         rclcpp::TimerBase::SharedPtr init_timer;
         rclcpp::TimerBase::SharedPtr sim_timer;
-        rclcpp::TimerBase::SharedPtr gesture_timer;
 };
 
 int main(int argc, char * argv[]) {
