@@ -1,4 +1,4 @@
-//robot_move.cpp
+// robot_move.cpp
 #include <memory>
 #include <string>
 #include <vector>
@@ -14,12 +14,14 @@
 #include "geometry_msgs/msg/pose.hpp"
 #include "geometry_msgs/msg/twist.hpp"
 #include "geometry_msgs/msg/pose_stamped.hpp"
-#include "nav_msgs/msg/odometry.hpp"
+// [변경] nav_msgs/odometry.hpp 제거 → AMCL pose 헤더 추가
+// [삭제] #include "nav_msgs/msg/odometry.hpp"
+// [삭제] #include "tf2_ros/transform_listener.h"
+// [삭제] #include "tf2_ros/buffer.h"
+// [삭제] #include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
+#include "geometry_msgs/msg/pose_with_covariance_stamped.hpp" // [추가] /amcl_pose 타입
 #include "nav_msgs/msg/occupancy_grid.hpp"
 #include "nav_msgs/msg/path.hpp"
-#include "tf2_ros/transform_listener.h"
-#include "tf2_ros/buffer.h"
-#include "tf2_geometry_msgs/tf2_geometry_msgs.hpp"
 
 using namespace std::chrono_literals;
 
@@ -39,8 +41,7 @@ class Robot_move : public rclcpp::Node {
             costmap_update = false;
             prev_linear_v  = 0.0;
             prev_angular_w = 0.0;
-            tf_buffer_   = std::make_shared<tf2_ros::Buffer>(this->get_clock());
-            tf_listener_ = std::make_shared<tf2_ros::TransformListener>(*tf_buffer_);
+            // [변경] tf_buffer_, tf_listener_ 초기화 제거
 
             // publisher
             cmd_vel_pub     = this->create_publisher<geometry_msgs::msg::Twist>("/cmd_vel", 10);
@@ -60,9 +61,14 @@ class Robot_move : public rclcpp::Node {
             follow_target_sub = this->create_subscription<geometry_msgs::msg::PoseStamped>(
                 "follow_target_pose", 10,
                 std::bind(&Robot_move::follow_target_callback, this, std::placeholders::_1));
-            odom_sub = this->create_subscription<nav_msgs::msg::Odometry>(
-                "/odom", 10,
-                std::bind(&Robot_move::odom_callback, this, std::placeholders::_1));
+            // [변경] /odom 구독 제거 → /amcl_pose 구독으로 교체
+            // [삭제] odom_sub = this->create_subscription<nav_msgs::msg::Odometry>("/odom", ...)
+            // [추가] AMCL은 map 프레임 기준 위치를 직접 퍼블리시하므로 TF 변환 불필요
+            amcl_pose_sub = this->create_subscription<
+                geometry_msgs::msg::PoseWithCovarianceStamped>(
+                    "/amcl_pose",
+                    rclcpp::QoS(rclcpp::KeepLast(1)).reliable().transient_local(),
+                    std::bind(&Robot_move::amcl_pose_callback, this, std::placeholders::_1));
             costmap_sub = this->create_subscription<nav_msgs::msg::OccupancyGrid>(
                 "/map", rclcpp::QoS(rclcpp::KeepLast(1)).transient_local().reliable(),
                 std::bind(&Robot_move::costmap_callback, this, std::placeholders::_1));
@@ -75,8 +81,15 @@ class Robot_move : public rclcpp::Node {
         }
 
     private:
-        void odom_callback(const nav_msgs::msg::Odometry::SharedPtr msg) { current_odom = msg; }
+        // [변경] odom_callback 제거 → amcl_pose_callback 으로 교체
+        // /amcl_pose : AMCL이 map 프레임 기준으로 퍼블리시하는 위치 추정값
+        void amcl_pose_callback(
+            const geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr msg) {
+            current_amcl_pose = msg;
+        }
+
         void scan_callback(const sensor_msgs::msg::LaserScan::SharedPtr msg) { latest_scan = msg; }
+
         void costmap_callback(const nav_msgs::msg::OccupancyGrid::SharedPtr msg) {
             if (!current_costmap) {
                 current_costmap = msg;
@@ -110,19 +123,17 @@ class Robot_move : public rclcpp::Node {
             target_follow_pose = msg;
         }
 
+        // [변경] TF 변환(odom → map) 제거
+        // AMCL이 이미 map 프레임 기준 pose를 퍼블리시하므로 그대로 사용
         bool get_robot_pose_in_map(geometry_msgs::msg::Pose& map_pose) {
-            if (!current_odom) { return false; }
-            geometry_msgs::msg::PoseStamped odom_stamped, map_stamped;
-            odom_stamped.header.frame_id = "odom";
-            odom_stamped.header.stamp    = this->now();
-            odom_stamped.pose            = current_odom->pose.pose;
-            try {
-                tf_buffer_->transform(odom_stamped, map_stamped, "map", tf2::durationFromSec(0.1));
-                map_pose = map_stamped.pose;
-                return true;
-            } catch (const tf2::TransformException& e) {
+            if (!current_amcl_pose) {
+                RCLCPP_WARN_THROTTLE(this->get_logger(), *this->get_clock(), 2000,
+                    "AMCL pose 미수신 - 자율주행 대기 중");
                 return false;
             }
+            // PoseWithCovarianceStamped.pose.pose → geometry_msgs::Pose 추출
+            map_pose = current_amcl_pose->pose.pose;
+            return true;
         }
 
         void publish_global_path() {
@@ -143,14 +154,13 @@ class Robot_move : public rclcpp::Node {
             if (current_mode != "auto_drive") { return; }
             if (!current_costmap || !target_auto_goal) { return; }
 
-            // 긴급 정지
+            // 긴급 정지 : LiDAR 전방 ±45도 이내 0.3m 미만 장애물 감지 시 즉시 정지
             if (latest_scan && !latest_scan->ranges.empty()) {
-                int total = latest_scan->ranges.size();
+                int    total     = latest_scan->ranges.size();
                 double angle_min = latest_scan->angle_min;
                 double angle_inc = latest_scan->angle_increment;
                 for (int i = 0; i < total; i++) {
                     double angle = angle_min + i * angle_inc;
-                    // 전방 ±30도 범위만 체크
                     if (std::abs(angle) > M_PI / 4.0) { continue; }
                     double r = latest_scan->ranges[i];
                     if (std::isfinite(r) && r < 0.3) {
@@ -277,7 +287,7 @@ class Robot_move : public rclcpp::Node {
 
             int ddx[8] = {1,-1, 0, 0, 1, 1,-1,-1};
             int ddy[8] = {0, 0, 1,-1, 1,-1, 1,-1};
-            bool found = false;
+            bool found      = false;
             int  iterations = 0;
 
             while (!open_set.empty() && iterations < 5000) {
@@ -336,6 +346,8 @@ class Robot_move : public rclcpp::Node {
             return path;
         }
 
+        // [변경] current_pose 는 AMCL 기반 map 프레임 pose 사용
+        // LiDAR 장애물 좌표 변환 시 AMCL yaw(누적 오차 없음) 사용 → 정확도 향상
         bool teb_planner(
             const geometry_msgs::msg::Pose& current_pose,
             const std::vector<geometry_msgs::msg::Pose>& plan,
@@ -343,8 +355,8 @@ class Robot_move : public rclcpp::Node {
         {
             if (plan.empty()) { return false; }
 
-            double siny = 2.0 * (current_pose.orientation.w * current_pose.orientation.z);
-            double cosy = 1.0 - 2.0 * (current_pose.orientation.z * current_pose.orientation.z);
+            double siny        = 2.0 * (current_pose.orientation.w * current_pose.orientation.z);
+            double cosy        = 1.0 - 2.0 * (current_pose.orientation.z * current_pose.orientation.z);
             double current_yaw = std::atan2(siny, cosy);
 
             std::vector<std::pair<double,double>> band;
@@ -354,6 +366,8 @@ class Robot_move : public rclcpp::Node {
                 band.push_back({plan[i].position.x, plan[i].position.y});
             }
 
+            // [변경] 장애물 좌표 변환에 AMCL yaw(map 프레임) 사용
+            // 기존 odom yaw 대비 장거리 주행 시 누적 오차 제거
             std::vector<std::pair<double,double>> obstacles;
             if (latest_scan && !latest_scan->ranges.empty()) {
                 int    total_ranges    = latest_scan->ranges.size();
@@ -437,27 +451,33 @@ class Robot_move : public rclcpp::Node {
         bool   replanning, costmap_update;
         double prev_linear_v, prev_angular_w;
 
-        std::vector<geometry_msgs::msg::Pose>      current_global_path;
-        sensor_msgs::msg::LaserScan::SharedPtr      latest_scan;
-        nav_msgs::msg::Odometry::SharedPtr          current_odom;
-        nav_msgs::msg::OccupancyGrid::SharedPtr     current_costmap;
-        geometry_msgs::msg::PoseStamped::SharedPtr  target_auto_goal;
-        geometry_msgs::msg::PoseStamped::SharedPtr  target_follow_pose;
+        std::vector<geometry_msgs::msg::Pose>     current_global_path;
+        sensor_msgs::msg::LaserScan::SharedPtr     latest_scan;
+        // [변경] current_odom 제거 → current_amcl_pose 로 교체
+        // [삭제] nav_msgs::msg::Odometry::SharedPtr current_odom;
+        geometry_msgs::msg::PoseWithCovarianceStamped::SharedPtr current_amcl_pose; // [추가]
+        nav_msgs::msg::OccupancyGrid::SharedPtr    current_costmap;
+        geometry_msgs::msg::PoseStamped::SharedPtr target_auto_goal;
+        geometry_msgs::msg::PoseStamped::SharedPtr target_follow_pose;
 
-        std::shared_ptr<tf2_ros::Buffer>            tf_buffer_;
-        std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
+        // [변경] TF buffer/listener 멤버 제거
+        // [삭제] std::shared_ptr<tf2_ros::Buffer>            tf_buffer_;
+        // [삭제] std::shared_ptr<tf2_ros::TransformListener> tf_listener_;
 
-        rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr  cmd_vel_pub;
-        rclcpp::Publisher<std_msgs::msg::String>::SharedPtr      nav2_status_pub;
-        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr        global_path_pub;
+        rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr cmd_vel_pub;
+        rclcpp::Publisher<std_msgs::msg::String>::SharedPtr     nav2_status_pub;
+        rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr       global_path_pub;
 
-        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr          mode_sub;
-        rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr      gesture_cmd_sub;
+        rclcpp::Subscription<std_msgs::msg::String>::SharedPtr           mode_sub;
+        rclcpp::Subscription<geometry_msgs::msg::Twist>::SharedPtr       gesture_cmd_sub;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr auto_drive_goal_sub;
         rclcpp::Subscription<geometry_msgs::msg::PoseStamped>::SharedPtr follow_target_sub;
-        rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr        odom_sub;
-        rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr   costmap_sub;
-        rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr    scan_sub;
+        // [변경] odom_sub 제거 → amcl_pose_sub 로 교체
+        // [삭제] rclcpp::Subscription<nav_msgs::msg::Odometry>::SharedPtr odom_sub;
+        rclcpp::Subscription<
+            geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr amcl_pose_sub; // [추가]
+        rclcpp::Subscription<nav_msgs::msg::OccupancyGrid>::SharedPtr  costmap_sub;
+        rclcpp::Subscription<sensor_msgs::msg::LaserScan>::SharedPtr   scan_sub;
 
         rclcpp::TimerBase::SharedPtr timer;
 };

@@ -13,9 +13,11 @@ from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, DurabilityPolicy, HistoryPolicy
 
 from sensor_msgs.msg import CompressedImage, LaserScan
-from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from nav_msgs.msg import OccupancyGrid, Path
+# [변경] Odometry 제거 → PoseWithCovarianceStamped 추가
+# [삭제] from nav_msgs.msg import OccupancyGrid, Odometry, Path
+from geometry_msgs.msg import PoseStamped, PoseWithCovarianceStamped  # [추가] AMCL pose 타입
 from std_msgs.msg import String, Int32MultiArray
-from geometry_msgs.msg import PoseStamped
 
 from PyQt6.QtWidgets import QApplication, QWidget, QVBoxLayout, QHBoxLayout, QLabel, QFrame
 from PyQt6.QtCore import Qt, QTimer, pyqtSignal, QObject
@@ -26,7 +28,9 @@ class SignalBridge(QObject):
     cam_a_signal   = pyqtSignal(np.ndarray)
     cam_b_signal   = pyqtSignal(np.ndarray)
     map_signal     = pyqtSignal(object)
-    odom_signal    = pyqtSignal(object)
+    # [변경] odom_signal → amcl_signal 로 교체
+    # [삭제] odom_signal = pyqtSignal(object)
+    amcl_signal    = pyqtSignal(object)  # [추가] /amcl_pose 신호
     mode_signal    = pyqtSignal(str)
     gesture_signal = pyqtSignal(list)
     scan_signal    = pyqtSignal(object)
@@ -46,15 +50,25 @@ class ROSUINode(Node):
             depth=1
         )
 
-        self.create_subscription(CompressedImage, 'camA_display',   self._camA_cb,    10)
-        self.create_subscription(CompressedImage, 'camB_display',   self._camB_cb,    10)
-        self.create_subscription(OccupancyGrid,  '/map',            self._map_cb,     map_qos)
-        self.create_subscription(Odometry,       '/odom',           self._odom_cb,    10)
-        self.create_subscription(String,         'current_mode',    self._mode_cb,    10)
-        self.create_subscription(Int32MultiArray,'gesture_data',    self._gesture_cb, 10)
-        self.create_subscription(LaserScan,      '/scan',           self._scan_cb,    10)
-        self.create_subscription(PoseStamped,    'auto_drive_goal', self._goal_cb,    10)
-        self.create_subscription(Path,           'global_path',     self._path_cb,    10)
+        # [변경] AMCL도 transient_local QoS 사용 (노드 재시작 시 마지막 위치 즉시 수신)
+        amcl_qos = QoSProfile(
+            reliability=ReliabilityPolicy.RELIABLE,
+            durability=DurabilityPolicy.TRANSIENT_LOCAL,
+            history=HistoryPolicy.KEEP_LAST,
+            depth=1
+        )
+
+        self.create_subscription(CompressedImage,           'camA_display',   self._camA_cb,    10)
+        self.create_subscription(CompressedImage,           'camB_display',   self._camB_cb,    10)
+        self.create_subscription(OccupancyGrid,             '/map',           self._map_cb,     map_qos)
+        # [변경] /odom(Odometry) 구독 제거 → /amcl_pose(PoseWithCovarianceStamped) 구독으로 교체
+        # [삭제] self.create_subscription(Odometry, '/odom', self._odom_cb, 10)
+        self.create_subscription(PoseWithCovarianceStamped, '/amcl_pose',     self._amcl_cb,    amcl_qos)  # [추가]
+        self.create_subscription(String,                    'current_mode',   self._mode_cb,    10)
+        self.create_subscription(Int32MultiArray,           'gesture_data',   self._gesture_cb, 10)
+        self.create_subscription(LaserScan,                 '/scan',          self._scan_cb,    10)
+        self.create_subscription(PoseStamped,               'auto_drive_goal',self._goal_cb,    10)
+        self.create_subscription(Path,                      'global_path',    self._path_cb,    10)
 
     def _camA_cb(self, msg):
         arr = np.frombuffer(msg.data, np.uint8)
@@ -67,7 +81,9 @@ class ROSUINode(Node):
         if frame is not None: self.bridge.cam_b_signal.emit(frame)
 
     def _map_cb(self, msg):     self.bridge.map_signal.emit(msg)
-    def _odom_cb(self, msg):    self.bridge.odom_signal.emit(msg)
+    # [변경] _odom_cb 제거 → _amcl_cb 추가
+    # [삭제] def _odom_cb(self, msg): self.bridge.odom_signal.emit(msg)
+    def _amcl_cb(self, msg):    self.bridge.amcl_signal.emit(msg)  # [추가]
     def _mode_cb(self, msg):    self.bridge.mode_signal.emit(msg.data)
     def _scan_cb(self, msg):    self.bridge.scan_signal.emit(msg)
     def _goal_cb(self, msg):    self.bridge.goal_signal.emit(msg)
@@ -97,7 +113,9 @@ class RobotDashboard(QWidget):
         self.bridge = bridge
         self._map_base    = None
         self._map_img     = None
-        self._latest_odom = None
+        # [변경] _latest_odom → _latest_amcl 로 교체
+        # [삭제] self._latest_odom = None
+        self._latest_amcl = None  # [추가] AMCL pose 캐시
         self._latest_scan = None
         self._latest_goal = None
         self._latest_path = None
@@ -192,7 +210,9 @@ class RobotDashboard(QWidget):
         self.bridge.cam_a_signal.connect(self._update_cam_a)
         self.bridge.cam_b_signal.connect(self._update_cam_b)
         self.bridge.map_signal.connect(self._cache_map)
-        self.bridge.odom_signal.connect(self._cache_odom)
+        # [변경] odom_signal → amcl_signal 연결로 교체
+        # [삭제] self.bridge.odom_signal.connect(self._cache_odom)
+        self.bridge.amcl_signal.connect(self._cache_amcl)  # [추가]
         self.bridge.mode_signal.connect(self._update_mode)
         self.bridge.gesture_signal.connect(self._update_gesture)
         self.bridge.scan_signal.connect(self._cache_scan)
@@ -222,12 +242,13 @@ class RobotDashboard(QWidget):
         self._map_img  = cv2.cvtColor(cv2.flip(img, 0), cv2.COLOR_GRAY2BGR)
         self._map_base = msg
 
-    def _cache_odom(self, msg): self._latest_odom = msg
+    # [변경] _cache_odom 제거 → _cache_amcl 추가
+    # [삭제] def _cache_odom(self, msg): self._latest_odom = msg
+    def _cache_amcl(self, msg): self._latest_amcl = msg  # [추가] PoseWithCovarianceStamped 캐시
     def _cache_scan(self, msg): self._latest_scan = msg
     def _cache_goal(self, msg): self._latest_goal = msg
     def _cache_path(self, msg): self._latest_path = msg
 
-    # ✅ 맵 좌표 변환 헬퍼
     def _world_to_canvas(self, wx, wy):
         res = self._map_base.info.resolution
         ox  = self._map_base.info.origin.position.x
@@ -244,22 +265,23 @@ class RobotDashboard(QWidget):
         if self._map_img is None or self._map_base is None: return
         canvas = self._map_img.copy()
 
-        # LiDAR 포인트 (반경 1m, 노란색 점)
-        if self._latest_odom and self._latest_scan:
-            rx   = self._latest_odom.pose.pose.position.x
-            ry   = self._latest_odom.pose.pose.position.y
-            qz   = self._latest_odom.pose.pose.orientation.z
-            qw   = self._latest_odom.pose.pose.orientation.w
-            yaw  = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
+        # [변경] LiDAR 포인트 시각화: odom → AMCL pose 기준으로 교체
+        # AMCL이 map 프레임 기준이므로 LiDAR 포인트 좌표가 지도와 정확히 일치
+        if self._latest_amcl and self._latest_scan:
+            rx  = self._latest_amcl.pose.pose.position.x    # [변경] amcl에서 위치 추출
+            ry  = self._latest_amcl.pose.pose.position.y
+            qz  = self._latest_amcl.pose.pose.orientation.z
+            qw  = self._latest_amcl.pose.pose.orientation.w
+            yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
 
-            scan       = self._latest_scan
-            angle      = scan.angle_min
+            scan  = self._latest_scan
+            angle = scan.angle_min
             for r in scan.ranges:
-                if math.isfinite(r) and r <= 1.0 and r > 0.05:  # 반경 1m 이내만
+                if math.isfinite(r) and r <= 1.0 and r > 0.05:
                     lx = rx + r * math.cos(yaw + angle)
                     ly = ry + r * math.sin(yaw + angle)
                     px, py = self._world_to_canvas(lx, ly)
-                    cv2.circle(canvas, (px, py), 2, (0, 220, 220), -1)  # 노란색
+                    cv2.circle(canvas, (px, py), 2, (0, 220, 220), -1)
                 angle += scan.angle_increment
 
         # 경로 선 (초록색)
@@ -276,28 +298,26 @@ class RobotDashboard(QWidget):
             gx, gy = self._world_to_canvas(
                 self._latest_goal.pose.position.x,
                 self._latest_goal.pose.position.y)
-            cv2.drawMarker(canvas, (gx, gy), (0, 0, 255),
-                           cv2.MARKER_CROSS, 5, 1)
+            cv2.drawMarker(canvas, (gx, gy), (0, 0, 255), cv2.MARKER_CROSS, 5, 1)
             cv2.circle(canvas, (gx, gy), 10, (0, 0, 255), 2)
 
-        # 로봇 현재 위치 (파란 원 + 방향 화살표)
-        if self._latest_odom:
-            rx = self._latest_odom.pose.pose.position.x
-            ry = self._latest_odom.pose.pose.position.y
-            qz = self._latest_odom.pose.pose.orientation.z
-            qw = self._latest_odom.pose.pose.orientation.w
+        # [변경] 로봇 위치 표시: odom → AMCL pose 기준으로 교체
+        if self._latest_amcl:
+            rx  = self._latest_amcl.pose.pose.position.x    # [변경] amcl에서 위치 추출
+            ry  = self._latest_amcl.pose.pose.position.y
+            qz  = self._latest_amcl.pose.pose.orientation.z
+            qw  = self._latest_amcl.pose.pose.orientation.w
             yaw = math.atan2(2.0 * qw * qz, 1.0 - 2.0 * qz * qz)
 
-            mx, my = self._world_to_canvas(rx, ry)
-            arrow_len = 15
+            mx, my     = self._world_to_canvas(rx, ry)
+            arrow_len  = 15
             ax = int(mx + arrow_len * math.cos(yaw))
             ay = int(my - arrow_len * math.sin(yaw))
             ay = max(0, min(ay, canvas.shape[0] - 1))
             ax = max(0, min(ax, canvas.shape[1] - 1))
 
-            cv2.circle(canvas, (mx, my), 3, (255, 80, 80), -1)   # 파란 원
-            cv2.arrowedLine(canvas, (mx, my), (ax, ay),
-                            (255, 255, 255), 1, tipLength=0.2)    # 방향 화살표
+            cv2.circle(canvas, (mx, my), 3, (255, 80, 80), -1)
+            cv2.arrowedLine(canvas, (mx, my), (ax, ay), (255, 255, 255), 1, tipLength=0.2)
 
         lbl = self.map_label.findChild(QLabel, "display")
         if lbl:
