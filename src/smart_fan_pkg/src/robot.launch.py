@@ -138,6 +138,19 @@ def generate_launch_description():
         }]
     )
 
+    gui_node = Node(
+        package='handsome_pkg',
+        executable='GUI.py',
+        name='robot_ui_node',
+        output='screen',
+        emulate_tty=True,
+    )
+    # cmake 파일에 추가 돼 있는지 확인
+    # install(PROGRAMS
+    #     scripts/GUI.py
+    #     DESTINATION lib/${PROJECT_NAME}
+    # )
+
     # ── 5. AMCL ─────────────────────────────────────────────────────
     # [추가] LiDAR + 지도 기반 위치 추정 (Monte Carlo Localization)
     # pub : /amcl_pose (map 프레임 기준 로봇 위치, transient_local QoS)
@@ -216,5 +229,6 @@ def generate_launch_description():
         robot_move_node,
         robot_vision_node,
         smart_fan_node,
+        gui_node,
         amcl_node,                 # [추가]
     ])
